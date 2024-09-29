@@ -39,8 +39,17 @@ class BuildData:
     def __init__(self):
         self.ClientRoot = ""
         self.ClientStream = ""
+        self.ChangeList = ""
+        self.need_sync_files: [str] = []
+
         self.step = 0
-        self.sync_progress = 0
+        self.progress_value = 0
+
+
+class ViewData:
+    def __init__(self):
+        self.step = 0
+        self.progress_value = 0
 
 
 class MainView(tk.Tk):
@@ -49,7 +58,7 @@ class MainView(tk.Tk):
 
         self.build_setting = BuildSetting()
         self.build_data = BuildData()
-
+        self.view_data = ViewData()
         self.tk_P4PORT = tk.StringVar()
         self.tk_P4USER = tk.StringVar()
         self.tk_P4CLIENT = tk.StringVar()
@@ -57,9 +66,11 @@ class MainView(tk.Tk):
         self.tk_build_editor = tk.IntVar()
         self.tk_build_exe = tk.IntVar()
         self.tk_change_list = tk.StringVar()
-        self.sync_progress = None
+        self.progress_bar = None
+        self.progress_text = tk.StringVar()
 
         self.work_thread = None
+        self.geometry("500x300")
         self.create_view()
 
     def create_view(self):
@@ -89,8 +100,6 @@ class MainView(tk.Tk):
 
         tk.Checkbutton(self, text="1. sync", variable=self.tk_sync).place(x=10, y=130)
         tk.Label(self, text='change').place(x=90, y=130)
-        self.sync_progress = ttk.Progressbar(self)
-        self.sync_progress.place(x=360, y=130, width=100, height=10)
 
         tk.Entry(self, textvariable=self.tk_change_list).place(x=150, y=130, width=180)
         tk.Checkbutton(self, text="2. build editor", variable=self.tk_build_editor).place(x=10, y=150)
@@ -98,7 +107,13 @@ class MainView(tk.Tk):
 
         b = tk.Button(self, text='Build', font=('Arial', 10), width=10, height=1,
                       command=lambda: self.run())
-        b.place(x=350, y=240)
+        b.place(x=10, y=220)
+
+        c = tk.Label(self, textvariable=self.progress_text, font=('Arial', 8))
+        c.place(x=20, y=260)
+        self.progress_bar = ttk.Progressbar(self)
+        self.progress_bar.place(x=10, y=280, width=480, height=6)
+
         self.schedule_tick()
         self.mainloop()
 
@@ -107,14 +122,26 @@ class MainView(tk.Tk):
         self.after(100, lambda: self.schedule_tick())
 
     def tick(self):
-        if self.build_data.step == 1:
-            self.sync_progress.step(self.build_data.sync_progress)
+        if self.view_data.step != self.build_data.step:
+            self.view_data.step = self.build_data.step
+            if self.view_data.step == 1:
+                self.progress_text = "sync..."
+                self.progress_bar.step(0 - self.view_data.progress_value)
+                self.view_data.progress_value = 0
 
-            self.update()
+        if self.view_data.step == 1:
+            progress_step_value = self.build_data.progress_value - self.view_data.progress_value
+            if progress_step_value > 0:
+                self.progress_bar.step(progress_step_value)
+                self.view_data.progress_value = self.build_data.progress_value
+
+        self.update()
 
     def run(self):
+        self.view_data.step = 0
         self.save_setting()
         self.init_p4()
+        self.build_data.ChangeList = self.tk_change_list.get()
 
         t = BuildSystem(self.build_data)
         t.daemon = True
@@ -150,13 +177,60 @@ class BuildSystem(threading.Thread):
         self.build_data = build_data
 
     def run(self):
-        while self.build_data.step != -1:
-            pass
+        self.get_sync_file("UE5EA")
+        # self.get_sync_file("S1Game")
+        # self.get_sync_file("S1GameServer")
+        self.sync()
+
+    def get_client_stream_param(self, relation_path):
+        client_stream = self.build_data.ClientStream
+        if not client_stream.endswith("/"):
+            client_stream += "/"
+        if len(relation_path) > 0:
+            client_stream += relation_path
+        if not client_stream.endswith("/"):
+            client_stream += "/"
+        client_stream += "..."
+
+        changelist = "@" + self.build_data.ChangeList
+        if self.build_data.ChangeList == "":
+            changelist = "#head"
+        client_stream += changelist
+
+        return client_stream
+
+    def get_sync_file(self, relation_path: str):
+        client_stream = self.get_client_stream_param(relation_path)
+        result = subprocess.run(['p4', 'sync', '-n', client_stream], capture_output=True, text=True)
+        files = result.stdout.splitlines()
+        for f in files:
+            if " - " in f:
+                a = f.split(" - ")
+                self.build_data.need_sync_files.append(a[0])
 
     def sync(self):
+        self.build_data.step = 1
+        self.build_data.progress_value = 0
+        need_sync_files = self.build_data.need_sync_files
+        if len(need_sync_files) == 0:
+            return
 
-        subprocess.run('p4 -C utf8 sync --parallel=threads=24 {0}/...{1} '.format(stream, changelist), cwd=cwd,
-                       stdout=None)
+        step_value = 99.0 / len(need_sync_files)
+
+        for file in self.build_data.need_sync_files:
+            cmd = 'p4 -I -C utf8 sync {0} '.format(file)
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=False)
+            print("exec:" + cmd)
+            while process.poll() is None:
+                output = process.stdout.readline().rstrip().decode('utf-8')
+                if output == '' and process.poll() is not None:
+                    break
+
+            self.build_data.progress_value += step_value
+
+
+
+
 def main():
     view = MainView()
 
