@@ -2,10 +2,13 @@ import threading
 import tkinter as tk
 import subprocess
 import os
+import tkinter.filedialog
 from datetime import time
 from threading import Thread
 from time import sleep
 from tkinter import ttk
+
+from requests import delete
 
 
 class BuildSetting:
@@ -40,7 +43,10 @@ class BuildData:
         self.ClientRoot = ""
         self.ClientStream = ""
         self.ChangeList = ""
-        self.need_sync_files: [str] = []
+        self.GameConfig = ""
+        self.sync = False
+        self.build_editor = False
+        self.build_game = False
 
         self.step = 0
         self.progress_value = 0
@@ -51,6 +57,85 @@ class ViewData:
         self.step = 0
         self.progress_value = 0
 
+
+class ListView:
+    class Node:
+        def __init__(self,view,width):
+            self.view = view
+            self.width = width
+    def __init__(self,span = 2):
+        self.span = span
+        self.children = []
+    def add_child(self,view,width=0):
+        self.children.append(ListView.Node(view,width))
+    def place(self,**kwargs):
+        x = kwargs['x']
+        y = kwargs['y']
+        w = 0
+        for i in range(len(self.children)):
+            node = self.children[i]
+            if i == 0:
+                node.view.place(x=x, y=y,width=node.width)
+                w = node.width
+            else:
+                node.view.place(x=x + w + i * self.span, y=y,width = node.width)
+                w += node.width
+
+
+    def place_forget(self):
+        for i in range(len(self.children)):
+            self.children[i].view.place_forget()
+
+
+class TreeView:
+    class TreeNode:
+        def __init__(self):
+            self.view = None
+            self.visibility: bool = False
+            self.parent: int = -1
+            self.children: [int] = []
+
+    def __init__(self):
+        self.tree_node = []
+        self.base_x = 0
+        self.base_y = 0
+        self.node_height = 30
+
+    def add_child(self,view,parent = -1):
+        node = TreeView.TreeNode()
+        node.view = view
+        #view.place_forget()
+        node.visibility = parent < 0
+        node.parent = parent
+        id = len(self.tree_node)
+        if parent >= 0:
+            self.tree_node[parent].children.append(id)
+        self.tree_node.append(node)
+        return id
+    def update(self):
+        x = 0
+        y = self.base_y
+        num = 0
+        for i in range(0,len(self.tree_node)):
+            node = self.tree_node[i]
+            if node.parent >= 0:
+                x = 26
+            else:
+                x = 0
+            if node.visibility:
+                node.view.place(x = x + self.base_x,y = y + self.node_height * num)
+                num += 1
+            else:
+                node.view.place_forget()
+    def expand(self,i):
+        self.toggle(i,True)
+    def collect(self,i):
+        self.toggle(i,False)
+    def toggle(self,i,v):
+        for node in self.tree_node:
+            if node.parent == i:
+                node.visibility = v
+        self.update()
 
 class MainView(tk.Tk):
     def __init__(self):
@@ -68,54 +153,97 @@ class MainView(tk.Tk):
         self.tk_change_list = tk.StringVar()
         self.progress_bar = None
         self.progress_text = tk.StringVar()
-
+        self.tk_game_config_combobox = None
+        self.left_tree = None
         self.work_thread = None
-        self.geometry("500x300")
+        self.geometry("700x500")
+        self.read_default()
         self.create_view()
-
-    def create_view(self):
-
+    def read_default(self):
         setting_saver_file = SettingSaver()
         setting_saver = setting_saver_file.load()
         self.tk_P4PORT.set(setting_saver.P4PORT)
         self.tk_P4USER.set(setting_saver.P4USER)
         self.tk_P4CLIENT.set(setting_saver.P4CLIENT)
-
         self.build_setting.P4PORT = setting_saver.P4PORT
         self.build_setting.P4USER = setting_saver.P4USER
         self.build_setting.P4CLIENT = setting_saver.P4CLIENT
+    def create_view(self):
+        frame_background_color = "darkgrey"
+        frame_forward_color = "black"
+        frame = tk.Frame(self,bg=frame_background_color)
+        frame.place(x = 0,y = 0,width = 700,height = 60)
 
-        a = tk.Label(self, text='Server', font=('Arial', 10))
-        a.place(x=10, y=10)
-        b = tk.Entry(self, show=None, font=('Arial', 10), textvariable=self.tk_P4PORT)
-        b.place(x=100, y=10, width=300)
-        c = tk.Label(self, text='User', font=('Arial', 10))
-        c.place(x=10, y=40)
-        d = tk.Entry(self, show=None, font=('Arial', 10), textvariable=self.tk_P4USER)
-        d.place(x=100, y=40)
-        e = tk.Label(self, text='Workspace', font=('Arial', 10))
-        e.place(x=10, y=70)
-        f = tk.Entry(self, show=None, font=('Arial', 10), textvariable=self.tk_P4CLIENT)
-        f.place(x=100, y=70)
+        tk.Label(frame, text='Server', font=('Arial', 10),bg=frame_background_color,fg=frame_forward_color).place(x=0, y=5)
+        tk.Entry(frame, font=('Arial', 10), textvariable=self.tk_P4PORT).place(x=2, y=25, width=200)
 
-        tk.Checkbutton(self, text="1. sync", variable=self.tk_sync).place(x=10, y=130)
-        tk.Label(self, text='change').place(x=90, y=130)
+        tk.Label(frame, text='User', font=('Arial', 10),bg=frame_background_color,fg=frame_forward_color).place(x=204, y=5)
+        tk.Entry(frame, font=('Arial', 10), textvariable=self.tk_P4USER).place(x=204, y=25,width=200)
 
-        tk.Entry(self, textvariable=self.tk_change_list).place(x=150, y=130, width=180)
-        tk.Checkbutton(self, text="2. build editor", variable=self.tk_build_editor).place(x=10, y=150)
-        tk.Checkbutton(self, text="3. build game", variable=self.tk_build_exe).place(x=10, y=170)
+        tk.Label(frame, text='Workspace', font=('Arial', 10),bg=frame_background_color,fg=frame_forward_color).place(x=406, y=5)
+        tk.Entry(frame, font=('Arial', 10), textvariable=self.tk_P4CLIENT).place(x=406, y=25,width=200)
 
-        b = tk.Button(self, text='Build', font=('Arial', 10), width=10, height=1,
+        row_bg = "whitesmoke"
+        left_frame = tk.Frame(self, bg=row_bg)
+        left_frame.place(x = 0, y = 60, width = 220, height = 440)
+
+        self.left_tree = TreeView()
+
+        i = self.left_tree.add_child(tk.Checkbutton(left_frame, text="1. sync", variable=self.tk_sync,bg=row_bg,command=lambda:self.switch_sync_checkbox()), -1)
+        h = ListView()
+        h.add_child(tk.Label(left_frame, text='change:',bg=row_bg),width=56)
+        h.add_child(tk.Entry(left_frame, textvariable=self.tk_change_list),width=120)
+        self.left_tree.add_child(h,i)
+
+        self.left_tree.add_child(tk.Checkbutton(left_frame, text="2. build editor", variable=self.tk_build_editor,bg=row_bg))
+        i = self.left_tree.add_child(tk.Checkbutton(left_frame, text="3. build game", variable=self.tk_build_exe,bg=row_bg,command=lambda:self.switch_build_game_checkbox() ))
+
+        h = ListView()
+        h.add_child(tk.Label(left_frame, text='config:', bg=row_bg), width=56)
+
+
+        game_config = ["Development", "Test", "Shipping"]
+        self.tk_game_config_combobox = ttk.Combobox(left_frame, values=game_config, font=('Arial', 12))
+        self.tk_game_config_combobox.current(1)
+        h.add_child(self.tk_game_config_combobox, width=120)
+        self.left_tree.add_child(h,parent=i)
+
+        self.left_tree.add_child(tk.Checkbutton(left_frame, text="4. replace...",bg=row_bg,command=lambda:self.switch_replace_checkbox()))
+
+        self.left_tree.add_child(tk.Checkbutton(left_frame, text="5. start game,with cmd:",bg=row_bg))
+
+        self.left_tree.update()
+
+
+        b = tk.Button(left_frame, text='Build', font=('Arial', 10), width=10, height=1,
                       command=lambda: self.run())
-        b.place(x=10, y=220)
+        b.place(x=10, y=400)
 
-        c = tk.Label(self, textvariable=self.progress_text, font=('Arial', 8))
-        c.place(x=20, y=260)
-        self.progress_bar = ttk.Progressbar(self)
-        self.progress_bar.place(x=10, y=280, width=480, height=6)
+        right_frame = tk.Frame(self, bg="beige")
+        right_frame.place(x = 220, y = 60, width = 480, height = 440)
+
+        self.progress_text.set("waiting...")
+        c = tk.Label(right_frame, textvariable=self.progress_text, font=('Arial', 8))
+        c.place(x=20, y=380)
+        self.progress_bar = ttk.Progressbar(right_frame)
+        self.progress_bar.place(x=10, y=420, width=460, height=6)
 
         self.schedule_tick()
         self.mainloop()
+    def switch_sync_checkbox(self):
+        if self.tk_sync.get():
+            self.left_tree.expand(0)
+        else:
+            self.left_tree.collect(0)
+
+    def switch_build_game_checkbox(self):
+        if self.tk_build_exe.get():
+            self.left_tree.expand(3)
+        else:
+            self.left_tree.collect(3)
+    def switch_replace_checkbox(self):
+        #tkinter.filedialog.askopenfilename(title="Choose a file",)
+        pass
 
     def schedule_tick(self):
         self.tick()
@@ -125,7 +253,7 @@ class MainView(tk.Tk):
         if self.view_data.step != self.build_data.step:
             self.view_data.step = self.build_data.step
             if self.view_data.step == 1:
-                self.progress_text = "sync..."
+                self.progress_text.set("sync...")
                 self.progress_bar.step(0 - self.view_data.progress_value)
                 self.view_data.progress_value = 0
 
@@ -136,13 +264,18 @@ class MainView(tk.Tk):
                 self.view_data.progress_value = self.build_data.progress_value
 
         self.update()
+    def step(self):
+        self.build_data.ChangeList = self.tk_change_list.get()
+        self.build_data.sync = self.tk_sync.get()
+        self.build_data.build_editor = self.tk_build_editor.get()
+        self.build_data.build_exe = self.tk_build_exe.get()
+        self.build_data.GameConfig = self.tk_game_config_combobox.get()
 
     def run(self):
         self.view_data.step = 0
         self.save_setting()
+        self.step()
         self.init_p4()
-        self.build_data.ChangeList = self.tk_change_list.get()
-
         t = BuildSystem(self.build_data)
         t.daemon = True
         t.start()
@@ -175,12 +308,78 @@ class BuildSystem(threading.Thread):
     def __init__(self, build_data: BuildData):
         threading.Thread.__init__(self)
         self.build_data = build_data
+        self.need_sync_source_files:[str] = []
 
     def run(self):
-        self.get_sync_file("UE5EA")
-        # self.get_sync_file("S1Game")
-        # self.get_sync_file("S1GameServer")
-        self.sync()
+        sync_content_process = []
+
+        if self.build_data.sync:
+            self.need_sync_source_files.extend(self.get_sync_file("UE5EA"))
+            self.need_sync_source_files.extend(self.get_sync_file("S1Game/Source"))
+            self.need_sync_source_files.extend(self.get_sync_file("S1Game/Plugins"))
+            self.need_sync_source_files.extend(self.get_sync_file("S1Game/S1Game.uproject"))
+            self.sync_source()
+
+            sync_content_process.append(self.sync_content("S1Game/Content"))
+            sync_content_process.append(self.sync_content("S1Game/Config"))
+
+        if self.build_data.build_editor:
+            self.build_editor()
+        if self.build_data.build_game:
+            self.build_game()
+
+        if self.build_data.sync and len(sync_content_process) > 0:
+            while True:
+                all_process_finished = True
+                for process in sync_content_process:
+                    if process.poll() is not None:
+                        all_process_finished = False
+                        break
+                if all_process_finished:
+                    break
+                sleep(0.01)
+
+    def sync_content(self,relation_path):
+        cmd = 'p4 -C utf8 sync {0}'.format(self.get_client_stream_param(relation_path))
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=False)
+        return process
+    def sync_source(self):
+        self.build_data.step = 1
+        self.build_data.progress_value = 0
+
+        if len(self.need_sync_source_files) == 0:
+            return
+        step_value = 99.0 / len(self.need_sync_source_files)
+
+        for file in self.need_sync_source_files:
+            cmd = 'p4 -I -C utf8 sync {0} '.format(file)
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=False)
+            print("exec:" + cmd)
+            while process.poll() is None:
+                output = process.stdout.readline().rstrip().decode('utf-8')
+                if output == '' and process.poll() is not None:
+                    break
+
+            self.build_data.progress_value += step_value
+
+    def build_game(self):
+        UAT_Path = os.path.join(self.build_data.Source, "UE5EA", "Engine", "Build", "BatchFiles", "RunUAT.bat")
+        CMD_Params = "BuildCookRun -project={0}/{1}/{1}.uproject -platform=Win64 -target={1} -clientconfig={2}".format(
+            self.build_data.Source, self.build_data.ProjectName, self.build_data.ClientConfig)
+
+        CMD_Params += " -noP4 -stdout -UTF8Output -Build -SkipCook -SkipStage -SkipPackage -skipbuildeditor -nobootstrapexe"
+
+        process = subprocess.Popen("{0} {1}".format(UAT_Path, CMD_Params), shell=True, stdout=None, encoding="UTF8")
+
+        while process.poll() is None:
+            output = process.stdout.readline().rstrip().decode('utf-8')
+            if output == '' and process.poll() is not None:
+                break
+
+
+    def build_editor(self):
+        pass
+
 
     def get_client_stream_param(self, relation_path):
         client_stream = self.build_data.ClientStream
@@ -200,35 +399,15 @@ class BuildSystem(threading.Thread):
         return client_stream
 
     def get_sync_file(self, relation_path: str):
+        result:[str] = []
         client_stream = self.get_client_stream_param(relation_path)
-        result = subprocess.run(['p4', 'sync', '-n', client_stream], capture_output=True, text=True)
-        files = result.stdout.splitlines()
+        p = subprocess.run(['p4', 'sync', '-n', client_stream], capture_output=True, text=True)
+        files = p.stdout.splitlines()
         for f in files:
             if " - " in f:
                 a = f.split(" - ")
-                self.build_data.need_sync_files.append(a[0])
-
-    def sync(self):
-        self.build_data.step = 1
-        self.build_data.progress_value = 0
-        need_sync_files = self.build_data.need_sync_files
-        if len(need_sync_files) == 0:
-            return
-
-        step_value = 99.0 / len(need_sync_files)
-
-        for file in self.build_data.need_sync_files:
-            cmd = 'p4 -I -C utf8 sync {0} '.format(file)
-            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=False)
-            print("exec:" + cmd)
-            while process.poll() is None:
-                output = process.stdout.readline().rstrip().decode('utf-8')
-                if output == '' and process.poll() is not None:
-                    break
-
-            self.build_data.progress_value += step_value
-
-
+                result.append(a[0])
+        return result
 
 
 def main():
