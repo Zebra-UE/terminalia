@@ -53,7 +53,8 @@ class BuildData:
         self.sync = False
         self.build_editor = False
         self.build_game = False
-        self.replace_target:bool|str = False
+        self.replace_target: bool | str = False
+        self.start_game: bool = False
         self.step = 0
         self.progress_value = 0
 
@@ -176,8 +177,6 @@ class MainView(tk.Tk):
         self.read_default()
         self.create_view()
 
-
-
     def read_default(self):
         setting_saver_file = SettingSaver()
         setting_saver = setting_saver_file.load()
@@ -235,7 +234,7 @@ class MainView(tk.Tk):
         self.left_tree.add_child(h, parent=i)
 
         self.left_tree.add_child(
-            tk.Checkbutton(left_frame, text="4. replace...",variable=self.tk_replace, bg=row_bg, command=lambda: self.switch_replace_checkbox()))
+            tk.Checkbutton(left_frame, text="4. replace...", variable=self.tk_replace, bg=row_bg))
 
         self.left_tree.add_child(tk.Checkbutton(left_frame, text="5. start game,with cmd:", bg=row_bg))
 
@@ -247,8 +246,8 @@ class MainView(tk.Tk):
 
         right_frame = tk.Frame(self, bg="beige")
         right_frame.place(x=220, y=60, width=480, height=440)
-        list_view = tk.Listbox(right_frame,bg="beige")
-        list_view.place(x = 0,y = 0,height = 380,width=480)
+        list_view = tk.Listbox(right_frame, bg="beige")
+        list_view.place(x=0, y=0, height=380, width=480)
 
         self.progress_text.set("waiting...")
         c = tk.Label(right_frame, textvariable=self.progress_text, font=('Arial', 8))
@@ -270,10 +269,6 @@ class MainView(tk.Tk):
             self.left_tree.expand(3)
         else:
             self.left_tree.collect(3)
-
-    def switch_replace_checkbox(self):
-        pass
-
 
     def schedule_tick(self):
         self.tick()
@@ -311,11 +306,12 @@ class MainView(tk.Tk):
         self.build_data.GameConfig = self.tk_game_config_combobox.get()
 
         #
-        project_path = os.path.join(self.build_data.ClientRoot,self.build_data.ProjectRelativePath)
+        project_path = os.path.join(self.build_data.ClientRoot, self.build_data.ProjectRelativePath)
         for f in os.listdir(project_path):
             if f.endswith(".uproject"):
                 self.build_data.ProjectName = f[:-9]
 
+        self.build_data.replace_target = self.tk_replace.get()
 
     def run(self):
         if self.build_system is not None:
@@ -366,15 +362,18 @@ class BuildSystem(threading.Thread):
         sync_content_process = None
         if self.build_data.sync:
             self.need_sync_source_files.extend(self.get_sync_file("UE5EA/"))
-            self.need_sync_source_files.extend(self.get_sync_file("{0}/Source/".format(self.build_data.ProjectRelativePath)))
-            self.need_sync_source_files.extend(self.get_sync_file("{0}/Plugins/".format(self.build_data.ProjectRelativePath)))
-            self.need_sync_source_files.extend(self.get_sync_file("{0}/{1}.uproject".format(self.build_data.ProjectRelativePath, self.build_data.ProjectName)))
+            self.need_sync_source_files.extend(
+                self.get_sync_file("{0}/Source/".format(self.build_data.ProjectRelativePath)))
+            self.need_sync_source_files.extend(
+                self.get_sync_file("{0}/Plugins/".format(self.build_data.ProjectRelativePath)))
+            self.need_sync_source_files.extend(self.get_sync_file(
+                "{0}/{1}.uproject".format(self.build_data.ProjectRelativePath, self.build_data.ProjectName)))
             self.sync_source()
             need_sync_content = [
-                "S1Game/Content/",
-                "S1Game/Config/",
-                "S1Game/Scripts/",
-                "S1Game/Build/",
+                "{0}/Content/".format(self.build_data.ProjectRelativePath),
+                "{0}/Config/".format(self.build_data.ProjectRelativePath),
+                "{0}/Scripts/".format(self.build_data.ProjectRelativePath),
+                "{0}/Build/".format(self.build_data.ProjectRelativePath),
                 "S1GameServer/"
             ]
             sync_content_process = self.sync_content(*need_sync_content)
@@ -385,6 +384,8 @@ class BuildSystem(threading.Thread):
             self.build_game()
         if self.build_data.replace_target is not False:
             self.replace_target()
+        if self.build_data.start_game:
+            self.start_game()
 
         if self.build_data.sync and sync_content_process is not None:
             while sync_content_process.poll() is None:
@@ -495,14 +496,18 @@ class BuildSystem(threading.Thread):
 
         game_path = os.path.join(self.build_data.ClientRoot, "S1Game", "Binaries", "Win64",
                                  "S1Game-Win64-Test.exe")
-        target_path = os.path.join(self.build_data.replace_target, "S1Game", "Binaries", "Win64", "S1Game-Win64-Test.exe")
+        target_path = os.path.join(self.build_data.replace_target, "S1Game", "Binaries", "Win64",
+                                   "S1Game-Win64-Test.exe")
 
         if os.path.exists(target_path):
             os.remove(target_path)
         shutil.copyfile(game_path, target_path)
 
-
         self.build_data.progress_value = 1
+
+    def start_game(self):
+        cmd = "S1Game"
+        subprocess.Popen(cmd, shell=True)
 
     def get_client_stream_param(self, relation_path):
         client_stream = self.build_data.ClientStream
