@@ -53,7 +53,7 @@ class BuildData:
         self.sync = False
         self.build_editor = False
         self.build_game = False
-        self.replace_target: bool | str = False
+        self.replace_target: bool = False
         self.start_game: bool = False
         self.step = 0
         self.progress_value = 0
@@ -283,6 +283,8 @@ class MainView(tk.Tk):
                 self.progress_text.set("build editor")
             elif self.view_data.step == 3:
                 self.progress_text.set("build game")
+            elif self.view_data.step == 6:
+                self.progress_text.set("sync content...")
 
             elif self.view_data.step == -1:
                 self.build_system = None
@@ -319,8 +321,9 @@ class MainView(tk.Tk):
 
         self.view_data.step = -1
         self.save_setting()
-        self.step()
+
         self.init_p4()
+        self.step()
 
         self.build_system = BuildSystem(self.build_data)
         self.build_system.daemon = True
@@ -355,6 +358,7 @@ class BuildSystem(threading.Thread):
         threading.Thread.__init__(self)
         self.build_data = build_data
         self.need_sync_source_files: [str] = []
+        self.target_path = None
 
     def run(self):
         self.build_data.step = 0
@@ -382,20 +386,22 @@ class BuildSystem(threading.Thread):
             self.build_editor()
         if self.build_data.build_game:
             self.build_game()
-        if self.build_data.replace_target is not False:
+        if self.build_data.replace_target:
             self.replace_target()
         if self.build_data.start_game:
             self.start_game()
 
         if self.build_data.sync and sync_content_process is not None:
+            self.build_data.step = 6
             while sync_content_process.poll() is None:
                 output = sync_content_process.stdout.readline().rstrip().decode('utf-8')
                 if output == '' and sync_content_process.poll() is not None:
                     break
                 if len(output) > 0:
                     print(output)
-        print("finished")
 
+        print("finished")
+        self.sync_save()
         self.build_data.step = -1
 
     def sync_content(self, *relation_path):
@@ -425,6 +431,12 @@ class BuildSystem(threading.Thread):
                     break
 
             self.build_data.progress_value += step_value
+    def sync_save(self):
+        changelist_txt = os.path.join(self.build_data.ClientRoot, "changelist.txt")
+        if os.path.exists(changelist_txt):
+            os.remove(changelist_txt)
+        with open(changelist_txt, mode="w", encoding='utf8') as f:
+            f.write(self.build_data.ChangeList)
 
     def build_game(self):
         self.build_data.step = 3
@@ -448,16 +460,28 @@ class BuildSystem(threading.Thread):
                 if output == '' and process.poll() is not None:
                     break
                 if len(output) > 0:
-                    print(output)
+                    self.update_build_progress(output)
+
             except:
                 print('e')
+
+    def update_build_progress(self, output):
+        if output.startswith('['):
+            word = output[1:output.index("]", 1)]
+            word = word.split("/")
+            if len(word) == 2:
+                print(output)
+                a = int(word[0])
+                b = int(word[1])
+                if b > 0:
+                    self.build_data.progress_value = (a / b) * 100
 
     def build_editor(self):
         self.build_data.step = 2
         self.build_data.progress_value = 0
 
         root_path = self.build_data.ClientRoot
-        process = subprocess.Popen("{0}\S1Game\GenerateProjectFiles.bat".format(root_path), shell=True, stdout=None,
+        process = subprocess.Popen("{0}/S1Game/GenerateProjectFiles.bat".format(root_path), shell=True, stdout=None,
                                    encoding="UTF8")
         process.communicate()
 
@@ -478,36 +502,50 @@ class BuildSystem(threading.Thread):
                 # ------ Building 3 action(s) started ------
                 #
                 if len(output) > 0:
-                    if output.startswith('['):
-                        word = output[1:output.index("]", 1)]
-                        word = word.split("/")
-                        a = int(word[0])
-                        b = int(word[1])
-                        if b > 0:
-                            self.build_data.progress_value = a / b
+                    self.update_build_progress(output)
             except:
                 pass
 
             sleep(0.01)
 
+    def get_build_output_name(self):
+        if self.build_data.GameConfig == "Development":
+            return "{0}.exe".format(self.build_data.ProjectName)
+        else:
+            return "{0}-Win64-{1}".format(self.build_data.ProjectName,self.build_data.GameConfig)
+    def find_target(self):
+        if self.target_path is None:
+            for k in os.listdir(self.build_data.TargetPath):
+                if "_{0}_" in k:
+                    p = os.path.join(self.build_data.TargetPath, k)
+                    if not os.path.isdir(p):
+                        continue
+                    else:
+                        self.target_path = (
+                            os.path.join(p, "Win64", "S1Game", "Binaries", "Win64",self.get_build_output_name()))
+                        break
+        return self.target_path
     def replace_target(self):
         self.build_data.step = 4
         self.build_data.progress_value = 0
 
-        game_path = os.path.join(self.build_data.ClientRoot, "S1Game", "Binaries", "Win64",
-                                 "S1Game-Win64-Test.exe")
-        target_path = os.path.join(self.build_data.replace_target, "S1Game", "Binaries", "Win64",
-                                   "S1Game-Win64-Test.exe")
+        game_path = os.path.join(self.build_data.ClientRoot, "S1Game", "Binaries", "Win64",self.get_build_output_name())
+        target_path = self.find_target()
+        if target_path is not None:
+            if os.path.exists(target_path):
+                os.remove(target_path)
+            shutil.copyfile(game_path, target_path)
 
-        if os.path.exists(target_path):
-            os.remove(target_path)
-        shutil.copyfile(game_path, target_path)
-
-        self.build_data.progress_value = 1
+        self.build_data.progress_value = 100
 
     def start_game(self):
-        cmd = "S1Game"
-        subprocess.Popen(cmd, shell=True)
+
+        cmd = self.find_target()
+        if cmd is not None:
+            try:
+                subprocess.call(["runas", "/noprofile", "/user:Administrator", ' '.join(cmd)])
+            except:
+                print(cmd)
 
     def get_client_stream_param(self, relation_path):
         client_stream = self.build_data.ClientStream
