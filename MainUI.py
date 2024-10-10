@@ -271,10 +271,10 @@ class MainView(tk.Tk):
         list_view.place(x=0, y=0, height=380, width=480)
 
         self.progress_text.set("waiting...")
-        c = tk.Label(right_frame, textvariable=self.progress_text, font=('Arial', 8))
+        c = tk.Label(right_frame, textvariable=self.progress_text, font=('Arial', 8),bg="beige")
         c.place(x=20, y=380)
         self.progress_bar = ttk.Progressbar(right_frame)
-        self.progress_bar.place(x=10, y=420, width=460, height=6)
+        self.progress_bar.place(x=10, y=420, width=460, height=12)
 
         self.schedule_tick()
         self.mainloop()
@@ -330,7 +330,13 @@ class MainView(tk.Tk):
         self.update()
 
     def step(self):
-        self.build_data.ChangeList = self.tk_change_list.get()
+        changelist = self.tk_change_list.get()
+        if len(changelist) == 0:
+            changelist = self.get_latest_changelist()
+            self.tk_change_list.set(changelist)
+
+        self.build_data.ChangeList = changelist
+
         self.build_data.sync = self.tk_sync.get()
         self.build_data.build_editor = self.tk_build_editor.get()
         self.build_data.build_game = self.tk_build_exe.get()
@@ -343,6 +349,17 @@ class MainView(tk.Tk):
                 self.build_data.ProjectName = f[:-9]
 
         self.build_data.replace_target = self.tk_replace.get()
+
+    def get_latest_changelist(self):
+        # p4 changes -m 1 -s submitted
+        output = subprocess.check_output("p4 changes -m 1 -s submitted", encoding='utf-8',errors='ignore')
+        output = output.strip()
+        # Change 155713 on 2024/10/10
+        output = output.split()
+        if output[0] == 'Change':
+            return output[1]
+
+        raise Exception("change fail")
 
     def run(self):
         if self.build_system is not None:
@@ -413,14 +430,13 @@ class BuildSystem(threading.Thread):
 
         sync_content_process = None
         if self.build_data.sync:
-            self.need_sync_source_files.extend(self.get_sync_file("UE5EA/"))
-            self.need_sync_source_files.extend(
-                self.get_sync_file("{0}/Source/".format(self.build_data.ProjectRelativePath)))
-            self.need_sync_source_files.extend(
-                self.get_sync_file("{0}/Plugins/".format(self.build_data.ProjectRelativePath)))
-            self.need_sync_source_files.extend(self.get_sync_file(
-                "{0}/{1}.uproject".format(self.build_data.ProjectRelativePath, self.build_data.ProjectName)))
+            self.get_sync_file("UE5EA/")
+            self.get_sync_file("{0}/Source/".format(self.build_data.ProjectRelativePath))
+            self.get_sync_file("{0}/Plugins/".format(self.build_data.ProjectRelativePath))
+            self.get_sync_file(
+                "{0}/{1}.uproject".format(self.build_data.ProjectRelativePath, self.build_data.ProjectName))
             self.sync_source()
+
             need_sync_content = [
                 "{0}/Content/".format(self.build_data.ProjectRelativePath),
                 "{0}/Config/".format(self.build_data.ProjectRelativePath),
@@ -429,6 +445,7 @@ class BuildSystem(threading.Thread):
                 "S1GameServer/"
             ]
             sync_content_process = self.sync_content(*need_sync_content)
+
 
         if self.build_data.build_editor:
             self.build_editor()
@@ -442,14 +459,16 @@ class BuildSystem(threading.Thread):
         if self.build_data.sync and sync_content_process is not None:
             self.build_data.step = BuildStep.Sync_Content
             while sync_content_process.poll() is None:
-                output = sync_content_process.stdout.readline().rstrip().decode('utf-8')
+                output = sync_content_process.stdout.readline().rstrip().decode('utf-8',errors='ignore')
                 if output == '' and sync_content_process.poll() is not None:
                     break
                 if len(output) > 0:
                     print(output)
 
         print("finished")
-        self.sync_save()
+
+        if self.build_data.sync:
+            self.sync_save()
 
         self.build_data.step = BuildStep.Finished
 
@@ -458,7 +477,7 @@ class BuildSystem(threading.Thread):
         for x in relation_path:
             cmd += self.get_client_stream_param(x)
             cmd += " "
-        print(cmd)
+
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=False)
         return process
 
@@ -480,6 +499,8 @@ class BuildSystem(threading.Thread):
                     break
 
             self.build_data.progress_value += step_value
+
+            sleep(0.01)
 
     def sync_save(self):
         changelist_txt = os.path.join(self.build_data.ClientRoot, "changelist.txt")
@@ -568,7 +589,7 @@ class BuildSystem(threading.Thread):
     def find_target(self):
         if self.target_path is None:
             for k in os.listdir(self.build_data.TargetPath):
-                if "_{0}_".format(154993) in k:
+                if "_{0}_".format(self.build_data.ChangeList) in k:
                     p = os.path.join(self.build_data.TargetPath, k)
                     if not os.path.isdir(p):
                         continue
@@ -611,15 +632,30 @@ class BuildSystem(threading.Thread):
         return client_stream
 
     def get_sync_file(self, relation_path: str):
-        result: [str] = []
+
         client_stream = self.get_client_stream_param(relation_path)
+
         p = subprocess.run(['p4', 'sync', '-n', client_stream], capture_output=True, text=True)
+
         files = p.stdout.splitlines()
         for f in files:
+
             if " - " in f:
                 a = f.split(" - ")
-                result.append(a[0])
-        return result
+                if len(a) == 2:
+                    if a[1].startswith("added as") or a[1].startswith("updating"):
+                        self.need_sync_source_files.append(a[0])
+                    elif a[1].startswith("deleted as"):
+                        b = a[0]
+                        b = b[0:b.rfind('#')]
+                        b += "@{0}".format(self.build_data.ChangeList)
+                        self.need_sync_source_files.append(b)
+                    else:
+                        print(f)
+            else:
+                print(f)
+
+
 
 
 def main():
@@ -627,5 +663,3 @@ def main():
 
 
 main()
-
-
