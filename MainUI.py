@@ -1,3 +1,4 @@
+import datetime
 import shutil
 import threading
 import tkinter as tk
@@ -49,6 +50,24 @@ class SettingSaver:
         return build_setting
 
 
+class ProgressValue:
+    def __init__(self, current=0, total=0):
+        self.set(current, total)
+
+    def step(self, num):
+        self.current += num
+
+    def set(self, current, total):
+        self.current = current
+        self.total = total
+
+    def get(self):
+        if self.total == 0:
+            return 100
+
+        return (self.current / self.total) * 100
+
+
 class BuildData:
     def __init__(self):
         self.ClientRoot = ""
@@ -68,14 +87,14 @@ class BuildData:
         self.replace_target: bool = False
 
         self.step: BuildStep = BuildStep.Ready
-        self.progress_value = 0
+        self.progress_value = ProgressValue()
         self.target_path: str = ""
 
 
 class ViewData:
     def __init__(self):
         self.step: BuildStep = BuildStep.Ready
-        self.progress_value = 0
+        self.progress_value: int = 0
 
 
 class ListView:
@@ -182,11 +201,12 @@ class MainView(tk.Tk):
         self.tk_change_list = tk.StringVar()
         self.progress_bar = None
         self.progress_text = tk.StringVar()
+        self.cached_progress_text = ""
         self.tk_game_config_combobox = None
         self.tk_start_game_trace = tk.IntVar()
         self.tk_start_game_command = tk.StringVar()
-        self.left_tree = None
 
+        self.left_tree = None
         self.build_system = None
 
         self.geometry("700x500")
@@ -271,7 +291,7 @@ class MainView(tk.Tk):
         list_view.place(x=0, y=0, height=380, width=480)
 
         self.progress_text.set("waiting...")
-        c = tk.Label(right_frame, textvariable=self.progress_text, font=('Arial', 8),bg="beige")
+        c = tk.Label(right_frame, textvariable=self.progress_text, font=('Arial', 8), bg="beige")
         c.place(x=20, y=380)
         self.progress_bar = ttk.Progressbar(right_frame)
         self.progress_bar.place(x=10, y=420, width=460, height=12)
@@ -305,13 +325,13 @@ class MainView(tk.Tk):
         if self.view_data.step != self.build_data.step:
             self.view_data.step = self.build_data.step
             if self.view_data.step == BuildStep.Sync_Source:
-                self.progress_text.set("sync source...")
+                self.cached_progress_text = "sync source..."
             elif self.view_data.step == BuildStep.Build_Editor:
-                self.progress_text.set("build editor")
+                self.cached_progress_text = "build editor..."
             elif self.view_data.step == BuildStep.Build_Game:
-                self.progress_text.set("build game")
+                self.cached_progress_text = "build game..."
             elif self.view_data.step == BuildStep.Sync_Content:
-                self.progress_text.set("sync content...")
+                self.cached_progress_text = "sync content..."
 
             elif self.view_data.step == BuildStep.Finished:
                 self.build_system = None
@@ -321,23 +341,40 @@ class MainView(tk.Tk):
             self.progress_bar.step(0 - self.view_data.progress_value)
             self.view_data.progress_value = 0
 
-        if self.view_data.step.value > 0 and self.view_data.step != BuildStep.Finished:
-            progress_step_value = self.build_data.progress_value - self.view_data.progress_value
-            if progress_step_value > 0:
-                self.progress_bar.step(progress_step_value)
-                self.view_data.progress_value = self.build_data.progress_value
+        self.update_progress()
 
         self.update()
 
+    def update_progress(self):
+
+        current_progress = self.build_data.progress_value.get()
+
+        if self.view_data.progress_value < current_progress:
+            detal = current_progress - self.view_data.progress_value
+            self.progress_bar.step(detal)
+            self.view_data.progress_value = current_progress
+
+
+        self.progress_text.set(
+            self.cached_progress_text + " {0}/{1}".format(self.build_data.progress_value.current, self.build_data.progress_value.total))
+
     def step(self):
-        changelist = self.tk_change_list.get()
-        if len(changelist) == 0:
-            changelist = self.get_latest_changelist()
-            self.tk_change_list.set(changelist)
-
-        self.build_data.ChangeList = changelist
-
         self.build_data.sync = self.tk_sync.get()
+
+        if self.build_data.sync:
+            changelist = self.tk_change_list.get()
+            if len(changelist) == 0:
+                changelist = self.get_latest_changelist()
+                self.tk_change_list.set(changelist)
+
+            self.build_data.ChangeList = changelist
+        else:
+            p = os.path.join(self.build_data.ClientRoot, "changelist.txt")
+            with open(p, "r", encoding="utf8") as f:
+                changelist = f.readline()
+                changelist = changelist.strip()
+                self.build_data.ChangeList = changelist
+
         self.build_data.build_editor = self.tk_build_editor.get()
         self.build_data.build_game = self.tk_build_exe.get()
         self.build_data.GameConfig = self.tk_game_config_combobox.get()
@@ -352,7 +389,7 @@ class MainView(tk.Tk):
 
     def get_latest_changelist(self):
         # p4 changes -m 1 -s submitted
-        output = subprocess.check_output("p4 changes -m 1 -s submitted", encoding='utf-8',errors='ignore')
+        output = subprocess.check_output("p4 changes -m 1 -s submitted", encoding='utf-8', errors='ignore')
         output = output.strip()
         # Change 155713 on 2024/10/10
         output = output.split()
@@ -387,7 +424,6 @@ class MainView(tk.Tk):
             argument += " ".join(['"{0}"'.format(x) for x in params])
             argument += "'"
 
-        print(cmd)
         if cmd is not None:
             try:
                 subprocess.Popen(["powershell", "Start-Process", cmd, argument, "-Verb", "RunAs"], shell=True)
@@ -446,6 +482,7 @@ class BuildSystem(threading.Thread):
             ]
             sync_content_process = self.sync_content(*need_sync_content)
 
+            self.sync_save()
 
         if self.build_data.build_editor:
             self.build_editor()
@@ -459,16 +496,13 @@ class BuildSystem(threading.Thread):
         if self.build_data.sync and sync_content_process is not None:
             self.build_data.step = BuildStep.Sync_Content
             while sync_content_process.poll() is None:
-                output = sync_content_process.stdout.readline().rstrip().decode('utf-8',errors='ignore')
+                output = sync_content_process.stdout.readline().rstrip().decode('utf-8', errors='ignore')
                 if output == '' and sync_content_process.poll() is not None:
                     break
                 if len(output) > 0:
                     print(output)
 
         print("finished")
-
-        if self.build_data.sync:
-            self.sync_save()
 
         self.build_data.step = BuildStep.Finished
 
@@ -483,11 +517,7 @@ class BuildSystem(threading.Thread):
 
     def sync_source(self):
         self.build_data.step = BuildStep.Sync_Source
-        self.build_data.progress_value = 0
-
-        if len(self.need_sync_source_files) == 0:
-            return
-        step_value = 99.0 / len(self.need_sync_source_files)
+        self.build_data.progress_value = ProgressValue(0, len(self.need_sync_source_files))
 
         for file in self.need_sync_source_files:
             cmd = 'p4 -I -C utf8 sync {0} '.format(file)
@@ -498,7 +528,7 @@ class BuildSystem(threading.Thread):
                 if output == '' and process.poll() is not None:
                     break
 
-            self.build_data.progress_value += step_value
+            self.build_data.progress_value.step(1)
 
             sleep(0.01)
 
@@ -511,7 +541,7 @@ class BuildSystem(threading.Thread):
 
     def build_game(self):
         self.build_data.step = BuildStep.Build_Game
-        self.build_data.progress_value = 0
+        self.build_data.progress_value = ProgressValue(0, 0)
 
         UAT_Path = os.path.join(self.build_data.ClientRoot, "UE5EA", "Engine", "Build", "BatchFiles", "RunUAT.bat")
         CMD_Params = "BuildCookRun -project={0}/{1}/{1}.uproject -platform=Win64 -target={1} -clientconfig={2}".format(
@@ -520,8 +550,11 @@ class BuildSystem(threading.Thread):
         CMD_Params += " -noP4 -stdout -UTF8Output -Build -SkipCook -SkipStage -SkipPackage"
         CMD_Params += " -skipbuildeditor -nobootstrapexe"
 
-        print(UAT_Path)
-        print(CMD_Params)
+        game_path = os.path.join(self.build_data.ClientRoot, "S1Game", "Binaries", "Win64",
+                                 self.get_build_output_name())
+        if os.path.exists(game_path):
+            os.remove(game_path)
+
         process = subprocess.Popen("{0} {1}".format(UAT_Path, CMD_Params), shell=True, stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT)
 
@@ -537,6 +570,9 @@ class BuildSystem(threading.Thread):
                 pass
             sleep(0.01)
 
+        if not os.path.exists(game_path):
+            raise Exception("game path not exists")
+
     def update_build_progress(self, output):
         if output.startswith('['):
             word = output[1:output.index("]", 1)]
@@ -546,11 +582,11 @@ class BuildSystem(threading.Thread):
                 a = int(word[0])
                 b = int(word[1])
                 if b > 0:
-                    self.build_data.progress_value = (a / b) * 100
+                    self.build_data.progress_value.set(a, b)
 
     def build_editor(self):
         self.build_data.step = BuildStep.Build_Editor
-        self.build_data.progress_value = 0
+        self.build_data.progress_value = ProgressValue()
 
         root_path = self.build_data.ClientRoot
         process = subprocess.Popen("{0}/S1Game/GenerateProjectFiles.bat".format(root_path), shell=True, stdout=None,
@@ -601,7 +637,7 @@ class BuildSystem(threading.Thread):
 
     def replace_target(self):
         self.build_data.step = BuildStep.Replace_Target
-        self.build_data.progress_value = 0
+        self.build_data.progress_value = ProgressValue(0, 1)
 
         game_path = os.path.join(self.build_data.ClientRoot, "S1Game", "Binaries", "Win64",
                                  self.get_build_output_name())
@@ -613,7 +649,7 @@ class BuildSystem(threading.Thread):
             print("target:{0}".format(target_path))
             shutil.copyfile(game_path, target_path)
 
-        self.build_data.progress_value = 100
+        self.build_data.progress_value.step(1)
 
     def get_client_stream_param(self, relation_path):
         client_stream = self.build_data.ClientStream
@@ -654,8 +690,6 @@ class BuildSystem(threading.Thread):
                         print(f)
             else:
                 print(f)
-
-
 
 
 def main():
