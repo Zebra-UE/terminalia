@@ -18,7 +18,8 @@ class BuildStep(Enum):
     Build_Editor = 2
     Build_Game = 3
     Replace_Target = 4
-    Sync_Content = 5
+    Start_Game = 5
+    Sync_Content = 6
 
     Finished = 100
 
@@ -63,7 +64,7 @@ class ProgressValue:
 
     def get(self):
         if self.total == 0:
-            return 100
+            return 0
 
         return (self.current / self.total) * 100
 
@@ -85,10 +86,15 @@ class BuildData:
         self.build_editor = False
         self.build_game = False
         self.replace_target: bool = False
+        self.start_game: bool = False
+        self.enable_trace: bool = False
+        self.additive_game_param: str = ""
 
         self.step: BuildStep = BuildStep.Ready
         self.progress_value = ProgressValue()
         self.target_path: str = ""
+
+        self.event: [str] = []
 
 
 class ViewData:
@@ -325,19 +331,16 @@ class MainView(tk.Tk):
         if self.view_data.step != self.build_data.step:
             self.view_data.step = self.build_data.step
             if self.view_data.step == BuildStep.Sync_Source:
-                self.cached_progress_text = "sync source..."
+                self.cached_progress_text = "1. sync source..."
             elif self.view_data.step == BuildStep.Build_Editor:
-                self.cached_progress_text = "build editor..."
+                self.cached_progress_text = "2. build editor..."
             elif self.view_data.step == BuildStep.Build_Game:
-                self.cached_progress_text = "build game..."
+                self.cached_progress_text = "3. build game..."
             elif self.view_data.step == BuildStep.Sync_Content:
-                self.cached_progress_text = "sync content..."
+                self.cached_progress_text = "4. sync content..."
 
             elif self.view_data.step == BuildStep.Finished:
                 self.build_system = None
-                if self.tk_start_game.get():
-                    self.start_game()
-
             self.progress_bar.step(0 - self.view_data.progress_value)
             self.view_data.progress_value = 0
 
@@ -348,15 +351,16 @@ class MainView(tk.Tk):
     def update_progress(self):
 
         current_progress = self.build_data.progress_value.get()
+        if self.view_data.step == BuildStep.Build_Game:
+            print(self.view_data.progress_value, current_progress)
 
-        if self.view_data.progress_value < current_progress:
-            detal = current_progress - self.view_data.progress_value
-            self.progress_bar.step(detal)
-            self.view_data.progress_value = current_progress
-
+        delta = current_progress - self.view_data.progress_value
+        self.progress_bar.step(delta)
+        self.view_data.progress_value = current_progress
 
         self.progress_text.set(
-            self.cached_progress_text + " {0}/{1}".format(self.build_data.progress_value.current, self.build_data.progress_value.total))
+            self.cached_progress_text + " {0}/{1}".format(self.build_data.progress_value.current,
+                                                          self.build_data.progress_value.total))
 
     def step(self):
         self.build_data.sync = self.tk_sync.get()
@@ -386,6 +390,9 @@ class MainView(tk.Tk):
                 self.build_data.ProjectName = f[:-9]
 
         self.build_data.replace_target = self.tk_replace.get()
+        self.build_data.start_game = self.tk_start_game.get()
+        self.build_data.enable_trace = self.tk_start_game_trace.get()
+        self.build_data.additive_game_param = self.tk_start_game_command.get()
 
     def get_latest_changelist(self):
         # p4 changes -m 1 -s submitted
@@ -412,23 +419,7 @@ class MainView(tk.Tk):
         self.build_system.daemon = True
         self.build_system.start()
 
-    def start_game(self):
-        cmd = self.build_data.target_path
-        params = self.tk_start_game_command.get().split()
-        if self.tk_start_game_trace.get():
-            params.append("-trace=gpu,cpu,frame,log,bookmark,task,ContextSwitch")
 
-        argument = ""
-        if len(params) > 0:
-            argument = "-ArgumentList '"
-            argument += " ".join(['"{0}"'.format(x) for x in params])
-            argument += "'"
-
-        if cmd is not None:
-            try:
-                subprocess.Popen(["powershell", "Start-Process", cmd, argument, "-Verb", "RunAs"], shell=True)
-            except:
-                print(cmd)
 
     def save_setting(self):
         self.build_setting.P4PORT = self.tk_P4PORT.get()
@@ -492,6 +483,8 @@ class BuildSystem(threading.Thread):
         self.build_data.target_path = self.find_target()
         if self.build_data.replace_target:
             self.replace_target()
+        if self.build_data.start_game:
+            self.start_game()
 
         if self.build_data.sync and sync_content_process is not None:
             self.build_data.step = BuildStep.Sync_Content
@@ -545,7 +538,7 @@ class BuildSystem(threading.Thread):
 
         UAT_Path = os.path.join(self.build_data.ClientRoot, "UE5EA", "Engine", "Build", "BatchFiles", "RunUAT.bat")
         CMD_Params = "BuildCookRun -project={0}/{1}/{1}.uproject -platform=Win64 -target={1} -clientconfig={2}".format(
-            self.build_data.ClientRoot, "S1Game", "Test")
+            self.build_data.ClientRoot, "S1Game", self.build_data.GameConfig)
 
         CMD_Params += " -noP4 -stdout -UTF8Output -Build -SkipCook -SkipStage -SkipPackage"
         CMD_Params += " -skipbuildeditor -nobootstrapexe"
@@ -565,6 +558,7 @@ class BuildSystem(threading.Thread):
                     break
                 if len(output) > 0:
                     self.update_build_progress(output)
+
 
             except:
                 pass
@@ -650,6 +644,35 @@ class BuildSystem(threading.Thread):
             shutil.copyfile(game_path, target_path)
 
         self.build_data.progress_value.step(1)
+
+    def start_game(self):
+        exe_path = self.build_data.target_path
+        params = self.build_data.additive_game_param.split()
+
+        if self.build_data.enable_trace:
+            params.append("-trace=gpu,cpu,frame,log,bookmark,task,ContextSwitch")
+
+        argument = ""
+        if len(params) > 0:
+            if self.build_data.enable_trace:
+                argument = "-ArgumentList '"
+                argument += " ".join(['"{0}"'.format(x) for x in params])
+                argument += "'"
+            else:
+                argument = " ".join(["{0}".format(x) for x in params])
+
+        if exe_path is not None:
+
+            if self.build_data.enable_trace:
+                cmd = ["powershell", "Start-Process", exe_path, argument, "-Verb", "RunAs"]
+            else:
+                cmd = ["start", exe_path, argument]
+
+            print(cmd)
+            try:
+                subprocess.Popen(cmd, shell=True)
+            except:
+                pass
 
     def get_client_stream_param(self, relation_path):
         client_stream = self.build_data.ClientStream
