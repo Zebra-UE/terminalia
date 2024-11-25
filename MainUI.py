@@ -23,9 +23,8 @@ class BuildStep(Enum):
     Start_Game = 6
     Sync_Content = 7
 
-    Message = 99
+    BuildFinished = 99
     Finished = 100
-
 
 
 class ProgressValue:
@@ -110,15 +109,14 @@ def save_build_data(build_data: BuildData):
     with open('settings.ini', 'w', encoding='UTF8') as f:
         f.write(value)
 
-def load_build_data(build_data:BuildData):
 
+def load_build_data(build_data: BuildData):
     if os.path.exists('settings.ini'):
         with open('settings.ini', 'r', encoding='UTF8') as f:
             lines = f.readlines()
             build_data.P4PORT = lines[0].strip(" \n")
             build_data.P4USER = lines[1].strip(" \n")
             build_data.P4CLIENT = lines[2].strip(" \n")
-
 
 
 class ViewData:
@@ -255,6 +253,25 @@ class TreeView:
         self.update()
 
 
+class RadioGroup:
+    def __init__(self):
+        self.radio_array: [tk.Radiobutton] = []
+        self.current_selected = -1
+
+    def add(self, *args):
+        for node in args:
+            self.radio_array.append(node)
+    def select_default(self):
+        if self.current_selected == -1 and len(self.radio_array) > 0:
+            self.select(0)
+    def select(self,x):
+        self.current_selected = x
+        self.radio_array[x].select()
+        for i in range(0, len(self.radio_array)):
+            if i != x:
+                self.radio_array[i].deselect()
+
+
 class MainView(tk.Tk):
 
     def __init__(self):
@@ -275,7 +292,7 @@ class MainView(tk.Tk):
         self.progress_bar = None
         self.tk_step_text = tk.StringVar()
         self.tk_progress_text = tk.StringVar()
-
+        self.change_list_selector: RadioGroup = RadioGroup()
         self.cached_progress_text = ""
         self.dot_text = ""
         self.dot_time = 0
@@ -288,8 +305,8 @@ class MainView(tk.Tk):
 
         self.left_tree = None
 
-        self.build_process:Process = None
-        self.ui_tread:Thread = None
+        self.build_process: Process = None
+        self.ui_tread: Thread = None
         self.message_queue = Queue()
 
         self.message_data = []
@@ -305,7 +322,6 @@ class MainView(tk.Tk):
         self.tk_P4PORT.set(self.build_data.P4PORT)
         self.tk_P4USER.set(self.build_data.P4USER)
         self.tk_P4CLIENT.set(self.build_data.P4CLIENT)
-
 
     def create_view(self):
         frame_background_color = "darkgrey"
@@ -333,10 +349,18 @@ class MainView(tk.Tk):
 
         i = self.left_tree.add_child(tk.Checkbutton(left_frame, text="1. sync", variable=self.tk_sync, bg=row_bg,
                                                     command=lambda: self.switch_sync_checkbox()), -1)
-        h = ListView()
-        h.add_child(tk.Label(left_frame, text='change:', bg=row_bg), width=56)
-        h.add_child(tk.Entry(left_frame, textvariable=self.tk_change_list), width=120)
-        self.left_tree.add_child(h, i)
+
+        a = tk.Radiobutton(left_frame, text="lastest:", bg=row_bg)
+        b = tk.Radiobutton(left_frame, text="specify:", bg=row_bg)
+        c = tk.Entry(left_frame, width=40)
+        d = ListView(4)
+        d.add_child(b, width=70)
+        d.add_child(c, width=80)
+
+        self.change_list_selector.add(a, b)
+
+        self.left_tree.add_child(a, parent=i)
+        self.left_tree.add_child(d, parent=i)
 
         self.left_tree.add_child(
             tk.Checkbutton(left_frame, text="2. build editor", variable=self.tk_build_editor, bg=row_bg))
@@ -392,6 +416,8 @@ class MainView(tk.Tk):
     def switch_sync_checkbox(self):
         if self.tk_sync.get():
             self.left_tree.expand(0)
+            self.change_list_selector.select_default()
+            self.update()
         else:
             self.left_tree.collect(0)
 
@@ -440,7 +466,6 @@ class MainView(tk.Tk):
         self.ui_tread = None
 
 
-
 class UIProgress:
     def __init__(self, step, current, total):
         self.step = step
@@ -461,6 +486,9 @@ class UIThread(threading.Thread):
 
         self.progress_value = 0
         self.bNeedExit = False
+        self.current_step = BuildStep.Undefined
+        self.bNeedShowSyncContentProgress = False
+        self.sync_content_progress = UIProgress(BuildStep.Sync_Content, 0, 0)
 
     def run(self):
         while not self.bNeedExit:
@@ -470,6 +498,7 @@ class UIThread(threading.Thread):
                     self.refresh_progress(item)
                 elif isinstance(item, UIMessage):
                     self.refresh_message(item)
+                self.view.update()
 
         self.view.finished()
 
@@ -477,16 +506,30 @@ class UIThread(threading.Thread):
         self.view.tk_event_listview.insert(tk.END, item.message)
 
     def refresh_progress(self, item: UIProgress):
-        print(item.current,item.total)
-        if item.total > 0:
-            current_progress_value = item.current / item.total
-            delta = current_progress_value - self.progress_value
-            self.view.progress_bar.step(delta)
-            self.progress_value = current_progress_value
 
-        elif item.step == BuildStep.Finished:
-            self.bNeedExit = True
-            self.view.tk_step_text.set("Finished")
+        if item.total > 0:
+            if item.step != BuildStep.Sync_Content or self.bNeedShowSyncContentProgress:
+                current_progress_value = item.current / item.total
+                delta = current_progress_value - self.progress_value
+                self.view.progress_bar.step(delta)
+                self.progress_value = current_progress_value
+            elif item.step == BuildStep.Sync_Content:
+                self.sync_content_progress = item
+
+        elif item.step != BuildStep.Undefined:
+            if item.step != self.current_step:
+                self.current_step = item.step
+                if self.current_step == BuildStep.Sync_Source:
+                    self.view.tk_step_text.set("sync source")
+                elif self.current_step == BuildStep.Build_Editor:
+                    self.view.tk_step_text.set("build editor")
+                elif self.current_step == BuildStep.Finished:
+                    self.view.tk_step_text.set("Finished")
+
+            if item.step == BuildStep.BuildFinished:
+                self.bNeedShowSyncContentProgress = True
+            if item.step == BuildStep.Finished:
+                self.bNeedExit = True
 
 
 class SyncContentProcess(Process):
@@ -591,6 +634,8 @@ class BuildProcess(Process):
             request.ProjectName = self.build_data.ProjectName
             self.build_game(request)
 
+        self.message_queue.put(UIProgress(BuildStep.BuildFinished, 0, 0))
+
         if self.build_data.replace_target:
             q = ReplaceTargetRequest()
             self.replace_target(q)
@@ -604,13 +649,13 @@ class BuildProcess(Process):
             while self.sync_content_process.is_alive():
                 time.sleep(0.1)
 
-        self.message_queue.put(UIProgress(BuildStep.Finished,0,0))
+        self.message_queue.put(UIProgress(BuildStep.Finished, 0, 0))
 
     def sync_source(self, request: SyncRequest):
 
         self.message_queue.put(UIMessage("start sync source"))
 
-        self.message_queue.put(UIProgress(BuildStep.Sync_Source, 0, 2))
+        self.message_queue.put(UIProgress(BuildStep.Sync_Source, 0, 0))
 
         cmd = 'p4 sync -N'
         depot_path = ""
@@ -619,7 +664,7 @@ class BuildProcess(Process):
             depot_path += " "
 
         output: str = subprocess.check_output(cmd + " " + depot_path, encoding='utf-8')
-        self.message_queue.put(UIProgress(BuildStep.Sync_Source, 1, 2))
+
         change_file_num = [0, 0, 0]
         if output.startswith("Server network estimates:"):
             output = output[len("Server network estimates: "):]
@@ -632,20 +677,24 @@ class BuildProcess(Process):
         else:
             raise Exception("Server network estimates not yet implemented")
 
-        self.message_queue.put(UIMessage("add:{0},updated:{1},deleted:{2}".format(change_file_num[0],change_file_num[1],change_file_num[2])))
+        self.message_queue.put(UIMessage(
+            "add:{0},updated:{1},deleted:{2}".format(change_file_num[0], change_file_num[1], change_file_num[2])))
 
         total = change_file_num[0] + change_file_num[1] + change_file_num[2]
         self.message_queue.put(
             UIProgress(BuildStep.Sync_Source, 0, total))
 
         if total > 0:
+            current = 0
             cmd = 'p4 -I -C utf8 sync {0}'.format(depot_path)
 
             process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=False)
             process.daemon = True
 
             for line in self.read_process_output(process):
-                self.update_sync_progress(line)
+                if self.update_sync_progress(line):
+                    current += 1
+                    self.message_queue.put(UIProgress(BuildStep.Sync_Source, current, total))
 
     def sync_save(self):
         changelist_txt = os.path.join(self.build_data.ClientRoot, "changelist.txt")
@@ -662,7 +711,7 @@ class BuildProcess(Process):
         self.sync_content_process.start()
 
     def build_editor(self, request: BuildEditorRequest):
-        self.message_queue.put(UIProgress(BuildStep.Build_Editor, 0, 2))
+        self.message_queue.put(UIProgress(BuildStep.Build_Editor, 0, 0))
 
         root_path = self.build_data.ClientRoot
         project_file = os.path.join(root_path, request.ProjectName, "{0}.uproject".format(request.ProjectName))
@@ -678,8 +727,6 @@ class BuildProcess(Process):
                 p.communicate()
 
         generate_project_files()
-
-        self.message_queue.put(UIProgress(BuildStep.Build_Editor, 1, 2))
 
         bat = "{0}/{1}/Engine/Build/BatchFiles/Build.bat".format(root_path, request.EnginePathName)
         params = " -Target={0}Editor Win64 {1}".format(request.ProjectName, request.BuildConfig)
@@ -699,18 +746,14 @@ class BuildProcess(Process):
                     break
 
                 if len(output) > 0:
-                    a,b = self.update_build_progress(output)
-                    if b > 0:
-                        if find_total == -1:
-                            find_total = b * 2
-                            base_total = b
-                    self.message_queue.put(UIProgress(BuildStep.Build_Editor, a + base_total, find_total))
+                    self.update_build_progress(output)
+
             except:
                 pass
 
     def build_game(self, request: BuildGameRequest):
         response = BuildGameResponse()
-        self.view_data.step = BuildStep.Build_Game
+        self.message_queue.put(UIProgress(BuildStep.Build_Game, 0, 0))
         self.build_data.progress_value = ProgressValue(0, 0)
 
         UAT_Path = os.path.join(self.build_data.ClientRoot, request.EnginePathName, "Engine", "Build", "BatchFiles",
@@ -766,15 +809,10 @@ class BuildProcess(Process):
                 a = int(word[0])
                 b = int(word[1])
                 if b > 0:
-                    return a,b
+                    self.message_queue.put(UIProgress(BuildStep.Undefined, a, b))
 
     def update_sync_progress(self, output):
-        if "- updating" in output:
-            self.view_data.progress_value.step(1)
-        elif "- added as" in output:
-            self.view_data.progress_value.step(1)
-        elif "- deleted as" in output:
-            self.view_data.progress_value.step(1)
+        return "- updating" in output or "- added as" in output or "- deleted as" in output
 
     def read_process_output(self, process):
         while process.poll() is None:
