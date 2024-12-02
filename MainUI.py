@@ -12,19 +12,19 @@ from tkinter import ttk
 from enum import Enum
 from multiprocessing import Queue, Process
 
-
-class BuildStep(Enum):
-    Undefined = 0
-    Ready = 1
-    Sync_Source = 2
-    Build_Editor = 3
-    Build_Game = 4
-    Replace_Target = 5
-    Start_Game = 6
-    Sync_Content = 7
-
-    BuildFinished = 99
-    Finished = 100
+BuildStep = Enum("BuildStep",
+                 ['Undefined',
+                  "Ready",
+                  "Get_Changelist",
+                  "Sync_Source_Size",
+                  "Sync_Source",
+                  "Build_Editor",
+                  "Build_Game",
+                  "BuildFinished",
+                  "Replace_Target",
+                  "Start_Game",
+                  "Sync_Content",
+                  "Finished"])
 
 
 class ProgressValue:
@@ -104,19 +104,12 @@ class BuildData:
         self.target_path: str = ""
 
 
+
+
 def save_build_data(build_data: BuildData):
     value = "{0}\n{1}\n{2}\n".format(build_data.P4PORT, build_data.P4USER, build_data.P4CLIENT)
     with open('settings.ini', 'w', encoding='UTF8') as f:
         f.write(value)
-
-
-def load_build_data(build_data: BuildData):
-    if os.path.exists('settings.ini'):
-        with open('settings.ini', 'r', encoding='UTF8') as f:
-            lines = f.readlines()
-            build_data.P4PORT = lines[0].strip(" \n")
-            build_data.P4USER = lines[1].strip(" \n")
-            build_data.P4CLIENT = lines[2].strip(" \n")
 
 
 class ViewData:
@@ -147,16 +140,10 @@ class BuildEditorRequest:
 
 class BuildGameRequest:
     def __init__(self):
-        self.ClientRoot = ""
-        self.EnginePathName = ""
+        self.ClientPath = ""
+        self.EnginePath = ""
         self.ProjectName = ""
         self.BuildConfig = ""
-
-
-class BuildGameResponse:
-    def __init__(self):
-        self.success: bool = False
-        self.target_path = ""
 
 
 class ReplaceTargetRequest:
@@ -253,312 +240,17 @@ class TreeView:
         self.update()
 
 
-class RadioGroup:
-    def __init__(self):
-        self.radio_array: [tk.Radiobutton] = []
-        self.current_selected = -1
-
-    def add(self, *args):
-        for node in args:
-            self.radio_array.append(node)
-    def select_default(self):
-        if self.current_selected == -1 and len(self.radio_array) > 0:
-            self.select(0)
-    def select(self,x):
-        self.current_selected = x
-        self.radio_array[x].select()
-        for i in range(0, len(self.radio_array)):
-            if i != x:
-                self.radio_array[i].deselect()
-
-
-class MainView(tk.Tk):
-
-    def __init__(self):
-        tk.Tk.__init__(self)
-
-        self.build_data = BuildData()
-        self.view_data = ViewData()
-        self.tk_P4PORT = tk.StringVar()
-        self.tk_P4USER = tk.StringVar()
-        self.tk_P4CLIENT = tk.StringVar()
-        self.tk_sync = tk.IntVar()
-        self.tk_build_editor = tk.IntVar()
-        self.tk_build_exe = tk.IntVar()
-        self.tk_replace = tk.IntVar()
-        self.tk_start_game = tk.IntVar()
-        self.tk_change_list = tk.StringVar()
-        self.tk_start_server = tk.IntVar()
-        self.progress_bar = None
-        self.tk_step_text = tk.StringVar()
-        self.tk_progress_text = tk.StringVar()
-        self.change_list_selector: RadioGroup = RadioGroup()
-        self.cached_progress_text = ""
-        self.dot_text = ""
-        self.dot_time = 0
-        self.tk_game_config_combobox = None
-        self.tk_start_game_trace = tk.IntVar()
-        self.tk_start_game_command = tk.StringVar()
-
-        self.tk_event_index = -1
-        self.tk_event_listview: tk.Listbox = None
-
-        self.left_tree = None
-
-        self.build_process: Process = None
-        self.ui_tread: Thread = None
-        self.message_queue = Queue()
-
-        self.message_data = []
-
-        self.geometry("700x500")
-        self.read_default()
-        self.create_view()
-
-    def read_default(self):
-
-        load_build_data(self.build_data)
-
-        self.tk_P4PORT.set(self.build_data.P4PORT)
-        self.tk_P4USER.set(self.build_data.P4USER)
-        self.tk_P4CLIENT.set(self.build_data.P4CLIENT)
-
-    def create_view(self):
-        frame_background_color = "darkgrey"
-        frame_forward_color = "black"
-        frame = tk.Frame(self, bg=frame_background_color)
-        frame.place(x=0, y=0, width=700, height=60)
-
-        tk.Label(frame, text='Server', font=('Arial', 10), bg=frame_background_color, fg=frame_forward_color).place(x=0,
-                                                                                                                    y=5)
-        tk.Entry(frame, font=('Arial', 10), textvariable=self.tk_P4PORT).place(x=2, y=25, width=200)
-
-        tk.Label(frame, text='User', font=('Arial', 10), bg=frame_background_color, fg=frame_forward_color).place(x=204,
-                                                                                                                  y=5)
-        tk.Entry(frame, font=('Arial', 10), textvariable=self.tk_P4USER).place(x=204, y=25, width=200)
-
-        tk.Label(frame, text='Workspace', font=('Arial', 10), bg=frame_background_color, fg=frame_forward_color).place(
-            x=406, y=5)
-        tk.Entry(frame, font=('Arial', 10), textvariable=self.tk_P4CLIENT).place(x=406, y=25, width=200)
-
-        row_bg = "whitesmoke"
-        left_frame = tk.Frame(self, bg=row_bg)
-        left_frame.place(x=0, y=60, width=220, height=440)
-
-        self.left_tree = TreeView()
-
-        i = self.left_tree.add_child(tk.Checkbutton(left_frame, text="1. sync", variable=self.tk_sync, bg=row_bg,
-                                                    command=lambda: self.switch_sync_checkbox()), -1)
-
-        a = tk.Radiobutton(left_frame, text="lastest:", bg=row_bg)
-        b = tk.Radiobutton(left_frame, text="specify:", bg=row_bg)
-        c = tk.Entry(left_frame, width=40)
-        d = ListView(4)
-        d.add_child(b, width=70)
-        d.add_child(c, width=80)
-
-        self.change_list_selector.add(a, b)
-
-        self.left_tree.add_child(a, parent=i)
-        self.left_tree.add_child(d, parent=i)
-
-        self.left_tree.add_child(
-            tk.Checkbutton(left_frame, text="2. build editor", variable=self.tk_build_editor, bg=row_bg))
-        i = self.left_tree.add_child(
-            tk.Checkbutton(left_frame, text="3. build game", variable=self.tk_build_exe, bg=row_bg,
-                           command=lambda: self.switch_build_game_checkbox()))
-
-        h = ListView()
-        h.add_child(tk.Label(left_frame, text='config:', bg=row_bg), width=56)
-
-        game_config = ["Development", "Test", "Shipping"]
-        self.tk_game_config_combobox = ttk.Combobox(left_frame, values=game_config, font=('Arial', 12))
-        self.tk_game_config_combobox.current(1)
-        h.add_child(self.tk_game_config_combobox, width=120)
-        self.left_tree.add_child(h, parent=i)
-
-        self.left_tree.add_child(
-            tk.Checkbutton(left_frame, text="4. replace...", variable=self.tk_replace, bg=row_bg))
-
-        i = self.left_tree.add_child(
-            tk.Checkbutton(left_frame, text="5. start game,with cmd:", variable=self.tk_start_game, bg=row_bg,
-                           command=lambda: self.switch_start_game_checkbox()))
-        self.left_tree.add_child(tk.Checkbutton(left_frame, text="trace", bg=row_bg, variable=self.tk_start_game_trace),
-                                 parent=i)
-        self.left_tree.add_child(tk.Entry(left_frame, textvariable=self.tk_start_game_command), parent=i)
-
-        self.left_tree.add_child(
-            tk.Checkbutton(left_frame, text="6. start server", bg=row_bg, variable=self.tk_start_server))
-
-        self.left_tree.update()
-
-        b = tk.Button(left_frame, text='Build', font=('Arial', 10), width=10, height=1,
-                      command=lambda: self.run())
-        b.place(x=10, y=400)
-
-        right_frame = tk.Frame(self, bg="beige")
-        right_frame.place(x=220, y=60, width=480, height=440)
-        self.tk_event_listview = tk.Listbox(right_frame, bg="beige")
-        self.tk_event_listview.place(x=0, y=0, height=380, width=480)
-
-        self.tk_step_text.set("waiting...")
-        c = tk.Label(right_frame, textvariable=self.tk_step_text, font=('Arial', 8), bg="beige")
-        c.place(x=20, y=380)
-
-        self.tk_progress_text.set("/")
-        d = tk.Label(right_frame, textvariable=self.tk_progress_text, font=('Arial', 8), bg="beige")
-        d.place(x=220, y=400)
-        self.progress_bar = ttk.Progressbar(right_frame)
-        self.progress_bar.place(x=10, y=420, width=460, height=12)
-
-        self.mainloop()
-
-    def switch_sync_checkbox(self):
-        if self.tk_sync.get():
-            self.left_tree.expand(0)
-            self.change_list_selector.select_default()
-            self.update()
-        else:
-            self.left_tree.collect(0)
-
-    def switch_build_game_checkbox(self):
-        if self.tk_build_exe.get():
-            self.left_tree.expand(3)
-        else:
-            self.left_tree.collect(3)
-
-    def switch_start_game_checkbox(self):
-        if self.tk_start_game.get():
-            self.left_tree.expand(6)
-        else:
-            self.left_tree.collect(6)
-
-    def step(self):
-        self.build_data.P4USER = self.tk_P4USER.get()
-        self.build_data.P4PORT = self.tk_P4PORT.get()
-        self.build_data.P4CLIENT = self.tk_P4CLIENT.get()
-        self.build_data.sync = self.tk_sync.get()
-        self.build_data.ChangeList = self.tk_change_list.get()
-        self.build_data.build_editor = self.tk_build_editor.get()
-        self.build_data.build_game = self.tk_build_exe.get()
-        self.build_data.GameConfig = self.tk_game_config_combobox.get()
-        self.build_data.replace_target = self.tk_replace.get()
-        self.build_data.start_game = self.tk_start_game.get()
-        self.build_data.enable_trace = self.tk_start_game_trace.get()
-        self.build_data.additive_game_param = self.tk_start_game_command.get()
-        self.build_data.start_server = self.tk_start_server.get()
-
-    def run(self):
-        if self.ui_tread is None:
-            self.ui_tread = UIThread(self, self.message_queue)
-            self.ui_tread.start()
-
-        self.step()
-
-        if self.build_process is None:
-            self.build_process = BuildProcess(self.build_data, self.message_queue)
-            self.build_process.start()
-
-    def finished(self):
-        if self.build_process is not None:
-            while self.build_process.is_alive():
-                time.sleep(0.1)
-        self.ui_tread = None
-
-
-class UIProgress:
-    def __init__(self, step, current, total):
-        self.step = step
-        self.current = current
-        self.total = total
-
-
-class UIMessage:
-    def __init__(self, message):
-        self.message = message
-
-
-class UIThread(threading.Thread):
-    def __init__(self, view, message_queue):
-        threading.Thread.__init__(self)
-        self.view: MainView = view
-        self.message_queue: Queue = message_queue
-
-        self.progress_value = 0
-        self.bNeedExit = False
-        self.current_step = BuildStep.Undefined
-        self.bNeedShowSyncContentProgress = False
-        self.sync_content_progress = UIProgress(BuildStep.Sync_Content, 0, 0)
-
-    def run(self):
-        while not self.bNeedExit:
-            if self.message_queue.qsize() > 0:
-                item = self.message_queue.get(block=True, timeout=1)
-                if isinstance(item, UIProgress):
-                    self.refresh_progress(item)
-                elif isinstance(item, UIMessage):
-                    self.refresh_message(item)
-                self.view.update()
-
-        self.view.finished()
-
-    def refresh_message(self, item: UIMessage):
-        self.view.tk_event_listview.insert(tk.END, item.message)
-
-    def refresh_progress(self, item: UIProgress):
-
-        if item.total > 0:
-            if item.step != BuildStep.Sync_Content or self.bNeedShowSyncContentProgress:
-                current_progress_value = item.current / item.total
-                delta = current_progress_value - self.progress_value
-                self.view.progress_bar.step(delta)
-                self.progress_value = current_progress_value
-            elif item.step == BuildStep.Sync_Content:
-                self.sync_content_progress = item
-
-        elif item.step != BuildStep.Undefined:
-            if item.step != self.current_step:
-                self.current_step = item.step
-                if self.current_step == BuildStep.Sync_Source:
-                    self.view.tk_step_text.set("sync source")
-                elif self.current_step == BuildStep.Build_Editor:
-                    self.view.tk_step_text.set("build editor")
-                elif self.current_step == BuildStep.Finished:
-                    self.view.tk_step_text.set("Finished")
-
-            if item.step == BuildStep.BuildFinished:
-                self.bNeedShowSyncContentProgress = True
-            if item.step == BuildStep.Finished:
-                self.bNeedExit = True
-
-
-class SyncContentProcess(Process):
-    def __init__(self, *request_paths):
-        super().__init__()
-        self.request_paths = request_paths
-
-    def run(self):
-        cmd = 'p4 -I -C utf8 sync '
-        for x in self.request_paths:
-            cmd += x
-            cmd += " "
-
-        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=False)
-        process.daemon = True
-
-
 class BuildProcess(Process):
     def __init__(self, build_data: BuildData, message_queue: Queue):
         super().__init__()
         self.build_data = build_data
         self.message_queue = message_queue
-        self.sync_content_process: SyncContentProcess
+
+        self.sync_content_process: SyncContentProcess = None
 
     def get_latest_changelist(self):
-
         output = subprocess.check_output("p4 changes -m 1 -s submitted", encoding='utf-8', errors='ignore')
         output = output.strip()
-        # Change 155713 on 2024/10/10
         output = output.split()
         if output[0] == 'Change':
             return output[1]
@@ -584,7 +276,10 @@ class BuildProcess(Process):
         if self.build_data.sync:
             changelist = self.build_data.ChangeList
             if len(changelist) == 0:
+                self.message_queue.put(UIMessage("get latest changelist"))
                 changelist = self.get_latest_changelist()
+                self.message_queue.put(UIMessage("get latest changelist:{0}".format(changelist)))
+                self.message_queue.put(UIProgress(BuildStep.Get_Changelist,  int(changelist),0))
             self.build_data.ChangeList = changelist
         else:
             f = os.path.join(self.build_data.ClientRoot, "changelist.txt")
@@ -600,6 +295,7 @@ class BuildProcess(Process):
 
     def run(self):
         self.init()
+        self.message_queue.put(UIMessage("start"))
         if self.build_data.sync:
             request = SyncRequest()
             request.add_path("UE5EA/")
@@ -628,10 +324,10 @@ class BuildProcess(Process):
 
         if self.build_data.build_game:
             request = BuildGameRequest()
-            request.ClientRoot = self.build_data.ClientRoot
-            request.BuildConfig = self.build_data.GameConfig
-            request.EnginePathName = "UE5EA"
+            request.ClientPath = os.path.join(self.build_data.ClientRoot,"S1Game")
             request.ProjectName = self.build_data.ProjectName
+            request.BuildConfig = "Development"
+            request.EnginePathName = os.path.join(self.build_data.ClientRoot,"UE5EA")
             self.build_game(request)
 
         self.message_queue.put(UIProgress(BuildStep.BuildFinished, 0, 0))
@@ -647,13 +343,13 @@ class BuildProcess(Process):
 
         if self.build_data.sync and self.sync_content_process is not None:
             while self.sync_content_process.is_alive():
-                time.sleep(0.1)
+                pass
 
         self.message_queue.put(UIProgress(BuildStep.Finished, 0, 0))
 
     def sync_source(self, request: SyncRequest):
 
-        self.message_queue.put(UIMessage("start sync source"))
+        self.message_queue.put(UIMessage("sync source"))
 
         self.message_queue.put(UIProgress(BuildStep.Sync_Source, 0, 0))
 
@@ -707,7 +403,7 @@ class BuildProcess(Process):
         paths = []
         for x in request.path:
             paths.append(self.get_client_stream_param(x))
-        self.sync_content_process = SyncContentProcess(*paths)
+        self.sync_content_process = SyncContentProcess(self.message_queue,*paths)
         self.sync_content_process.start()
 
     def build_editor(self, request: BuildEditorRequest):
@@ -752,26 +448,25 @@ class BuildProcess(Process):
                 pass
 
     def build_game(self, request: BuildGameRequest):
-        response = BuildGameResponse()
+
         self.message_queue.put(UIProgress(BuildStep.Build_Game, 0, 0))
         self.build_data.progress_value = ProgressValue(0, 0)
 
-        UAT_Path = os.path.join(self.build_data.ClientRoot, request.EnginePathName, "Engine", "Build", "BatchFiles",
+        UAT_Path = os.path.join(request.EnginePath, "Engine", "Build", "BatchFiles",
                                 "RunUAT.bat")
 
-        CMD_Params = "BuildCookRun -project={0}/{1}/{1}.uproject -platform=Win64 -target={1} -clientconfig={2}".format(
-            self.build_data.ClientRoot, request.ProjectName, request.BuildConfig)
+        CMD_Params = "BuildCookRun -project={0}/{1}.uproject -platform=Win64 -target={1} -clientconfig={2}".format(
+            request.ClientPath, request.ProjectName, request.BuildConfig)
 
         CMD_Params += " -noP4 -stdout -UTF8Output -Build -SkipCook -SkipStage -SkipPackage"
         CMD_Params += " -skipbuildeditor -nobootstrapexe"
 
-        game_path = os.path.join(self.build_data.ClientRoot, "S1Game", "Binaries", "Win64",
-                                 self.get_build_output_name())
+        game_path = os.path.join(request.ClientPath, "Binaries", "Win64", self.get_build_output_name())
         if os.path.exists(game_path):
-            self.view_data.event_data.info("remove {0}".format(game_path))
+            self.message_queue.put(UIMessage("remove {0}".format(game_path)))
             os.remove(game_path)
 
-        self.view_data.event_data.info("build game Win64 {0}".format(self.build_data.GameConfig))
+        self.message_queue.put(UIMessage("build game Win64 {0}".format(self.build_data.GameConfig)))
 
         process = subprocess.Popen("{0} {1}".format(UAT_Path, CMD_Params), shell=True, stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT)
@@ -785,7 +480,7 @@ class BuildProcess(Process):
                 self.update_build_progress(output)
                 if "error" in output:
                     print(output)
-                    self.view_data.event_data.error(output)
+
                     error_text.append(output)
             time.sleep(0.01)
 
@@ -793,13 +488,7 @@ class BuildProcess(Process):
         if not os.path.exists(game_path):
             for x in error_text:
                 print(x)
-            self.view_data.event_data.error("{0} is not exists".format(game_path))
-            response.success = False
-        else:
-            response.target_path = game_path
-            response.success = True
 
-        return response
 
     def update_build_progress(self, output):
         if output.startswith('['):
@@ -809,7 +498,7 @@ class BuildProcess(Process):
                 a = int(word[0])
                 b = int(word[1])
                 if b > 0:
-                    self.message_queue.put(UIProgress(BuildStep.Undefined, a, b))
+                    self.message_queue.put(UIProgress(BuildStep.Build_Game, a, b))
 
     def update_sync_progress(self, output):
         return "- updating" in output or "- added as" in output or "- deleted as" in output
@@ -828,19 +517,6 @@ class BuildProcess(Process):
             return "{0}.{1}".format(self.build_data.ProjectName, ext)
         else:
             return "{0}-Win64-{1}.{2}".format(self.build_data.ProjectName, self.build_data.GameConfig, ext)
-
-    def find_target(self):
-        if self.target_path is None:
-            for k in os.listdir(self.build_data.TargetPath):
-                if "_{0}_".format(self.build_data.ChangeList) in k:
-                    p = os.path.join(self.build_data.TargetPath, k)
-                    if not os.path.isdir(p):
-                        continue
-                    else:
-                        self.target_path = (
-                            os.path.join(p, "Win64", "S1Game", "Binaries", "Win64", self.get_build_output_name()))
-                        break
-        return self.target_path
 
     def replace_target(self, request: ReplaceTargetRequest):
         self.view_data.step = BuildStep.Replace_Target
@@ -956,8 +632,300 @@ class BuildProcess(Process):
         return result
 
 
+class BuildSystem:
+    def __init__(self):
+        self.message_queue = Queue()
+        self.build_data = BuildData()
+        self.build_process: Process = None
+        self.ui_tread: Thread = None
+
+        self.load_build_data()
+
+    def load_build_data(self):
+        if os.path.exists('settings.ini'):
+            with open('settings.ini', 'r', encoding='UTF8') as f:
+                lines = f.readlines()
+                self.build_data.P4PORT = lines[0].strip(" \n")
+                self.build_data.P4USER = lines[1].strip(" \n")
+                self.build_data.P4CLIENT = lines[2].strip(" \n")
+
+    def Start(self):
+        if self.build_process is None:
+            self.build_process = BuildProcess(self.build_data, self.message_queue)
+
+            self.build_process.start()
+
+    def Stop(self):
+        if self.ui_tread is not None:
+            self.message_queue.put(UIProgress(BuildStep.Finished, 0, 0))
+
+
+
+
+    def MainLoop(self, view: tk.Tk):
+        if self.ui_tread is None:
+            self.ui_tread = UIThread(view, self.message_queue)
+            self.ui_tread.start()
+        view.mainloop()
+
+
+class MainView(tk.Tk):
+    def __init__(self, system: BuildSystem):
+        tk.Tk.__init__(self)
+        self.system: BuildSystem = system
+
+        self.view_data = ViewData()
+        self.tk_P4PORT = tk.StringVar()
+        self.tk_P4USER = tk.StringVar()
+        self.tk_P4CLIENT = tk.StringVar()
+        self.tk_sync = tk.IntVar()
+        self.tk_build_editor = tk.IntVar()
+        self.tk_build_exe = tk.IntVar()
+        self.tk_replace = tk.IntVar()
+        self.tk_start_game = tk.IntVar()
+        self.tk_change_list = tk.StringVar()
+        self.tk_start_server = tk.IntVar()
+        self.progress_bar = None
+        self.tk_step_text = tk.StringVar()
+        self.tk_progress_text = tk.StringVar()
+
+        self.cached_progress_text = ""
+        self.dot_text = ""
+        self.dot_time = 0
+        self.tk_game_config_combobox = None
+        self.tk_start_game_trace = tk.IntVar()
+        self.tk_start_game_command = tk.StringVar()
+
+        self.tk_event_index = -1
+        self.tk_event_listview: tk.Listbox = None
+
+        self.left_tree = None
+
+        self.geometry("700x500")
+        self.read_default()
+        self.create_view()
+
+    def destroy(self):
+        super().destroy()
+        self.system.Stop()
+
+    def read_default(self):
+        self.tk_P4PORT.set(self.system.build_data.P4PORT)
+        self.tk_P4USER.set(self.system.build_data.P4USER)
+        self.tk_P4CLIENT.set(self.system.build_data.P4CLIENT)
+
+    def create_view(self):
+        frame_background_color = "darkgrey"
+        frame_forward_color = "black"
+        frame = tk.Frame(self, bg=frame_background_color)
+        frame.place(x=0, y=0, width=700, height=60)
+
+        tk.Label(frame, text='Server', font=('Arial', 10), bg=frame_background_color, fg=frame_forward_color).place(x=0,
+                                                                                                                    y=5)
+        tk.Entry(frame, font=('Arial', 10), textvariable=self.tk_P4PORT).place(x=2, y=25, width=200)
+
+        tk.Label(frame, text='User', font=('Arial', 10), bg=frame_background_color, fg=frame_forward_color).place(x=204,
+                                                                                                                  y=5)
+        tk.Entry(frame, font=('Arial', 10), textvariable=self.tk_P4USER).place(x=204, y=25, width=200)
+
+        tk.Label(frame, text='Workspace', font=('Arial', 10), bg=frame_background_color, fg=frame_forward_color).place(
+            x=406, y=5)
+        tk.Entry(frame, font=('Arial', 10), textvariable=self.tk_P4CLIENT).place(x=406, y=25, width=200)
+
+        row_bg = "whitesmoke"
+        left_frame = tk.Frame(self, bg=row_bg)
+        left_frame.place(x=0, y=60, width=220, height=440)
+
+        self.left_tree = TreeView()
+
+        i = self.left_tree.add_child(tk.Checkbutton(left_frame, text="1. sync", variable=self.tk_sync, bg=row_bg,
+                                                    command=lambda: self.switch_sync_checkbox()), -1)
+
+        h = ListView()
+        h.add_child(tk.Label(left_frame, text='change:', bg=row_bg), width=56)
+        h.add_child(tk.Entry(left_frame, textvariable=self.tk_change_list), width=120)
+        self.left_tree.add_child(h, i)
+
+        self.left_tree.add_child(
+            tk.Checkbutton(left_frame, text="2. build editor", variable=self.tk_build_editor, bg=row_bg))
+        i = self.left_tree.add_child(
+            tk.Checkbutton(left_frame, text="3. build game", variable=self.tk_build_exe, bg=row_bg,
+                           command=lambda: self.switch_build_game_checkbox()))
+
+        h = ListView()
+        h.add_child(tk.Label(left_frame, text='config:', bg=row_bg), width=56)
+
+        game_config = ["Development", "Test", "Shipping"]
+        self.tk_game_config_combobox = ttk.Combobox(left_frame, values=game_config, font=('Arial', 12))
+        self.tk_game_config_combobox.current(1)
+        h.add_child(self.tk_game_config_combobox, width=120)
+        self.left_tree.add_child(h, parent=i)
+
+        self.left_tree.add_child(
+            tk.Checkbutton(left_frame, text="4. replace...", variable=self.tk_replace, bg=row_bg))
+
+        i = self.left_tree.add_child(
+            tk.Checkbutton(left_frame, text="5. start game,with cmd:", variable=self.tk_start_game, bg=row_bg,
+                           command=lambda: self.switch_start_game_checkbox()))
+        self.left_tree.add_child(tk.Checkbutton(left_frame, text="trace", bg=row_bg, variable=self.tk_start_game_trace),
+                                 parent=i)
+        self.left_tree.add_child(tk.Entry(left_frame, textvariable=self.tk_start_game_command), parent=i)
+
+        self.left_tree.add_child(
+            tk.Checkbutton(left_frame, text="6. start server", bg=row_bg, variable=self.tk_start_server))
+
+        self.left_tree.update()
+
+        b = tk.Button(left_frame, text='Build', font=('Arial', 10), width=10, height=1,
+                      command=lambda: self.run())
+        b.place(x=10, y=400)
+
+        right_frame = tk.Frame(self, bg="beige")
+        right_frame.place(x=220, y=60, width=480, height=440)
+        self.tk_event_listview = tk.Listbox(right_frame, bg="beige")
+        self.tk_event_listview.place(x=0, y=0, height=380, width=480)
+
+        self.tk_step_text.set("waiting...")
+        c = tk.Label(right_frame, textvariable=self.tk_step_text, font=('Arial', 8), bg="beige")
+        c.place(x=20, y=380)
+
+        self.tk_progress_text.set("/")
+        d = tk.Label(right_frame, textvariable=self.tk_progress_text, font=('Arial', 8), bg="beige")
+        d.place(x=220, y=400)
+        self.progress_bar = ttk.Progressbar(right_frame)
+        self.progress_bar.place(x=10, y=420, width=460, height=12)
+
+    def switch_sync_checkbox(self):
+        if self.tk_sync.get():
+            self.left_tree.expand(0)
+            self.update()
+        else:
+            self.left_tree.collect(0)
+
+    def switch_build_game_checkbox(self):
+        if self.tk_build_exe.get():
+            self.left_tree.expand(3)
+        else:
+            self.left_tree.collect(3)
+
+    def switch_start_game_checkbox(self):
+        if self.tk_start_game.get():
+            self.left_tree.expand(6)
+        else:
+            self.left_tree.collect(6)
+
+    def step(self):
+        self.system.build_data.P4USER = self.tk_P4USER.get()
+        self.system.build_data.P4PORT = self.tk_P4PORT.get()
+        self.system.build_data.P4CLIENT = self.tk_P4CLIENT.get()
+        self.system.build_data.sync = self.tk_sync.get()
+        self.system.build_data.ChangeList = self.tk_change_list.get()
+        self.system.build_data.build_editor = self.tk_build_editor.get()
+        self.system.build_data.build_game = self.tk_build_exe.get()
+        self.system.build_data.GameConfig = self.tk_game_config_combobox.get()
+        self.system.build_data.replace_target = self.tk_replace.get()
+        self.system.build_data.start_game = self.tk_start_game.get()
+        self.system.build_data.enable_trace = self.tk_start_game_trace.get()
+        self.system.build_data.additive_game_param = self.tk_start_game_command.get()
+        self.system.build_data.start_server = self.tk_start_server.get()
+
+    def run(self):
+        self.step()
+        self.system.Start()
+
+    def finished(self):
+        pass
+
+
+class UIProgress:
+    def __init__(self, step, current, total):
+        self.step = step
+        self.current = current
+        self.total = total
+
+
+class UIMessage:
+    def __init__(self, message):
+        self.message = message
+
+
+class UIThread(threading.Thread):
+    def __init__(self, view: MainView, message_queue):
+        threading.Thread.__init__(self)
+        self.view: MainView = view
+        self.message_queue: Queue = message_queue
+
+        self.progress_value = 0
+        self.bNeedExit = False
+        self.current_step = BuildStep.Undefined
+        self.bNeedShowSyncContentProgress = False
+        self.sync_content_progress = UIProgress(BuildStep.Sync_Content, 0, 0)
+
+    def run(self):
+        while not self.bNeedExit:
+            if self.message_queue.qsize() > 0:
+                item = self.message_queue.get(block=True, timeout=1)
+                if isinstance(item, UIProgress):
+                    self.refresh_progress(item)
+                elif isinstance(item, UIMessage):
+                    self.refresh_message(item)
+                self.view.update()
+
+        self.view.finished()
+
+    def refresh_message(self, item: UIMessage):
+        self.view.tk_event_listview.insert(tk.END, item.message)
+
+    def refresh_progress(self, item: UIProgress):
+
+        if item.total > 0:
+            if item.step != BuildStep.Sync_Content or self.bNeedShowSyncContentProgress:
+                current_progress_value = item.current / item.total
+                delta = current_progress_value - self.progress_value
+                self.view.progress_bar.step(delta)
+                self.progress_value = current_progress_value
+            elif item.step == BuildStep.Sync_Content:
+                self.sync_content_progress = item
+
+        elif item.step != BuildStep.Undefined:
+            if item.step != self.current_step:
+                self.current_step = item.step
+                if self.current_step == BuildStep.Sync_Source:
+                    self.view.tk_step_text.set("sync source")
+                elif self.current_step == BuildStep.Build_Editor:
+                    self.view.tk_step_text.set("build editor")
+                elif self.current_step == BuildStep.Finished:
+                    self.view.tk_step_text.set("Finished")
+
+            if item.step == BuildStep.BuildFinished:
+                self.bNeedShowSyncContentProgress = True
+            if item.step == BuildStep.Finished:
+                self.bNeedExit = True
+            if item.step == BuildStep.Get_Changelist:
+                self.view.tk_change_list.set(str(item.current))
+
+
+class SyncContentProcess(Process):
+    def __init__(self,message_queue, *request_paths):
+        super().__init__()
+        self.message_queue = message_queue
+        self.request_paths = request_paths
+
+    def run(self):
+        self.message_queue.put(UIMessage("sync context"))
+        cmd = 'p4 -I -C utf8 sync '
+        for x in self.request_paths:
+            cmd += x
+            cmd += " "
+
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=False)
+        process.daemon = True
+
+
 def main():
-    view = MainView()
+    system = BuildSystem()
+    view = MainView(system)
+    system.MainLoop(view)
 
 
 if __name__ == "__main__":
