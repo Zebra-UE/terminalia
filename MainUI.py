@@ -579,7 +579,7 @@ class LaunchThread(threading.Thread):
 
 
                         output = os.path.join(self.p4.ClientRoot, "S1Game", "Binaries", "Win64", "S1Game")
-
+                        #params.append("-trace=gpu,cpu,memory,frame,log,bookmark,task,ContextSwitch")
                         print("backup:" + backup)
                         print("origin:" + origin)
                         print("origin:" + output)
