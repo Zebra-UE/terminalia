@@ -870,7 +870,7 @@ class BuildSystem(threading.Thread):
         params = self.build_data.additive_game_param.split()
 
         if self.build_data.enable_trace:
-            params.append("-trace=gpu,cpu,frame,log,bookmark,task,ContextSwitch")
+            params.append("-trace=gpu,cpu,memory,frame,log,bookmark,task,ContextSwitch")
 
         argument = ""
         if len(params) > 0:
