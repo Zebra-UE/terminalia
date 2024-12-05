@@ -12,67 +12,32 @@ from tkinter import ttk
 from enum import Enum
 from multiprocessing import Queue, Process
 
-BuildStep = Enum("BuildStep",
-                 ['Undefined',
-                  "Ready",
-                  "Get_Changelist",
-                  "Sync_Source_Size",
-                  "Sync_Source",
-                  "Build_Editor",
-                  "Build_Game",
-                  "BuildFinished",
-                  "Replace_Target",
-                  "Start_Game",
-                  "Sync_Content",
-                  "Finished"])
+
+class BuildStep(Enum):
+    Undefined = 1
+    Ready = 2
+    Get_Changelist = 3
+    Sync_Source_Size = 4
+    Sync_Source = 5
+    Build_Editor = 6
+    Build_Game = 7
+    BuildFinished = 8
+    Replace_Target = 9
+    Start_Game = 10
+    Sync_Content = 11
+    Finished = 12
 
 
 class ProgressValue:
 
     def __init__(self, current=0, total=0):
-        self.current = 0
-        self.total = 0
-        self.set(current, total)
-
-    def step(self, num):
-        self.current += num
-
-    def set(self, current, total):
         self.current = current
         self.total = total
 
     def get(self):
         if self.total == 0:
             return 0
-
         return (self.current / self.total) * 100
-
-
-class EventData:
-    def __init__(self):
-        self.event_data = []
-        self.event_index = 0
-
-    def info(self, s):
-        self.event_data.append("info: " + s)
-
-    def error(self, e):
-        self.event_data.append("error: " + e)
-
-    def clean(self):
-        self.event_data = []
-        self.event_index = 0
-
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        if self.event_index < len(self.event_data):
-            x = self.event_data[self.event_index]
-            self.event_index += 1
-            return x
-        else:
-            raise StopIteration
 
 
 class BuildData:
@@ -104,21 +69,10 @@ class BuildData:
         self.target_path: str = ""
 
 
-
-
 def save_build_data(build_data: BuildData):
     value = "{0}\n{1}\n{2}\n".format(build_data.P4PORT, build_data.P4USER, build_data.P4CLIENT)
     with open('settings.ini', 'w', encoding='UTF8') as f:
         f.write(value)
-
-
-class ViewData:
-    def __init__(self):
-        self.step: BuildStep = BuildStep.Undefined
-        self.progress_value = ProgressValue()
-
-        self.event_data: EventData = EventData()
-
 
 class SyncRequest:
     def __init__(self):
