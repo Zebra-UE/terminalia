@@ -1,5 +1,6 @@
 import datetime
 import shutil
+import sys
 import threading
 import tkinter as tk
 import subprocess
@@ -15,13 +16,21 @@ from multiprocessing import Queue, Process
 from typing import Dict
 
 
-class EStageName(Enum):
+class StageName(Enum):
     Begin = 0,
     SyncSource = 1,
     SyncContext = 2,
     BuildEditor = 3,
     BuildGame = 4,
+    GetLatestChangeList = 5,
+    SyncExternal = 6,
     Exit = 100
+
+
+class EventName(Enum):
+    SyncSourceFinished = 1
+    SyncFinished = 2
+    BuildFinished = 3
 
 
 class UIMessageData:
@@ -29,14 +38,26 @@ class UIMessageData:
         self.message = message
 
 
-class UIStageData:
-    def __init__(self, stage, current, total):
+class EventData:
+    def __init__(self, event):
+        self.event = event
+
+
+class UIBeginStageData:
+    def __init__(self, stage, total):
         self.stage = stage
-        self.current = current
         self.total = total
 
 
+class UIProgressStageData:
+    def __init__(self, stage, current):
+        self.stage = stage
+        self.current = current
 
+
+class UIEndStageData:
+    def __init__(self, stage):
+        self.stage = stage
 
 
 class ViewData:
@@ -179,6 +200,7 @@ class MainView(tk.Tk):
         self.tk_replace = tk.IntVar()
         self.tk_start_game = tk.IntVar()
         self.tk_change_list = tk.StringVar()
+        self.tk_sync_full = tk.IntVar()
         self.tk_start_server = tk.IntVar()
         self.progress_bar = None
         self.tk_step_text = tk.StringVar()
@@ -236,6 +258,9 @@ class MainView(tk.Tk):
         h.add_child(tk.Label(left_frame, text='change:', bg=row_bg), width=56)
         h.add_child(tk.Entry(left_frame, textvariable=self.tk_change_list), width=120)
         self.left_tree.add_child(h, i)
+
+        self.left_tree.add_child(
+            tk.Checkbutton(left_frame, text="full sync", variable=self.tk_sync_full, bg=row_bg), i)
 
         self.left_tree.add_child(
             tk.Checkbutton(left_frame, text="2. build editor", variable=self.tk_build_editor, bg=row_bg))
@@ -335,6 +360,7 @@ class MainView(tk.Tk):
             self.launch_thread = LaunchThread(self.context)
             self.launch_thread.start()
 
+
 class UIStageStatistics:
     def __init__(self):
         self.progress = 0
@@ -342,7 +368,8 @@ class UIStageStatistics:
         self.total = 0
         self.start_time = time.time()
         self.end_time = 0
-        self.print_time = self.start_time
+        self.last_progress = 0
+
 
 class UIThread(threading.Thread):
     def __init__(self, view: MainView, message_queue):
@@ -350,23 +377,26 @@ class UIThread(threading.Thread):
         self.view: MainView = view
         self.message_queue: Queue = message_queue
 
-    def on_stage_begin(self,stage):
+    def on_stage_begin(self, stage):
         return "begin " + self.get_stage_text(stage)
-    def on_stage_end(self,stage):
+
+    def on_stage_end(self, stage):
         return "end " + self.get_stage_text(stage)
-    def get_stage_text(self,stage):
-        if stage == EStageName.SyncContext:
+
+    def get_stage_text(self, stage):
+        if stage == StageName.SyncContext:
             return "sync content"
-        elif stage == EStageName.SyncSource:
+        elif stage == StageName.SyncSource:
             return "sync source"
-        elif stage == EStageName.BuildGame:
+        elif stage == StageName.BuildGame:
             return "build game"
-        elif stage == EStageName.BuildEditor:
+        elif stage == StageName.BuildEditor:
             return "build editor"
         return "unkown"
+
     def run(self):
 
-        stage_statistics:Dict[EStageName, UIStageStatistics] = dict()
+        stage_statistics: Dict[StageName, UIStageStatistics] = dict()
         do_something = False
         current_progress_value = 0
         need_exit = False
@@ -374,51 +404,48 @@ class UIThread(threading.Thread):
             if not self.message_queue.empty():
                 do_something = True
                 item = self.message_queue.get(block=False)
-                if isinstance(item, UIStageData):
-                    if item.stage not in stage_statistics:
-                        stage_statistics[item.stage] = UIStageStatistics()
-                        self.view.tk_event_listview.insert(tk.END,self.on_stage_begin(stage))
-                    stage_statistics[item.stage].progress = item.current / item.total
-                    stage_statistics[item.stage].current = item.current
-                    stage_statistics[item.stage].total = item.total
+                if isinstance(item, UIMessageData):
+                    self.view.tk_event_listview.insert(tk.END, item.message)
+                else:
+                    do_something = True
+                    if isinstance(item, UIBeginStageData):
+                        if item.stage == StageName.GetLatestChangeList:
+                            self.view.tk_change_list = item.total
+                            self.view.update()
+                        else:
+                            stage_statistics[item.stage] = UIStageStatistics()
+                            stage_statistics[item.stage].total = item.total
+                    elif isinstance(item, UIProgressStageData):
+                        if item.stage in stage_statistics:
+                            stage_statistics[item.stage].current = item.current
+                    elif isinstance(item, UIEndStageData):
+                        if item.stage in stage_statistics:
+                            stage_statistics[item.stage].end_time = time.time()
+                        else:
+                            if item.stage == StageName.Exit:
+                                need_exit = True
 
-                    if item.current == item.total:
-                        stage_statistics[item.stage].end_time = time.time()
-                        self.view.tk_event_listview.insert(tk.END, self.on_stage_end(stage))
-                    if item.stage == EStageName.Exit:
-                        need_exit = True
+                    if do_something:
+                        do_something = False
+                        progress_text = ""
+                        for stage, statistics in stage_statistics.items():
+                            progress_text += "{0}:{1}/{2}    ".format(self.get_stage_text(stage), statistics.current,
+                                                                      statistics.total)
 
-            if self.message_queue.empty() and do_something:
-                do_something = False
-                progress = 0
-                current_stage = EStageName.Begin
-                for stage, statistics in stage_statistics.items():
-                    if statistics.end_time == 0:
-                        if current_stage == EStageName.Begin:
-                            current_stage = stage
-                            progress = statistics.progress
-                        elif current_stage == EStageName.SyncContext:
-                            current_stage = stage
-                            progress = statistics.progress
+                        self.view.tk_step_text.set(progress_text)
 
-                        current_time = time.time()
-                        if current_time - statistics.print_time > 10.0:
-                            statistics.print_time = current_time
-                            self.view.tk_event_listview.insert(tk.END,
-                                                               "{2}:{0}/{1}".format(statistics.current, statistics.total,self.get_stage_text(stage)))
-                delta = progress - current_progress_value
-                self.view.progress_bar.step(delta)
-                self.view.update()
+                if need_exit and not do_something:
+                    break
 
-            if need_exit and not do_something:
-                break
 
 class SyncData:
     def __init__(self):
         self.ClientStream = ""
         self.ChangeList = ""
         self.source_path = []
-        self.content_path = []
+        self.content_path = ""
+        self.external_path = []
+        self.full_sync = False
 
 
 class BuildData:
@@ -484,11 +511,11 @@ class LaunchThread(threading.Thread):
             sync_data.source_path.append("{0}/Plugins/".format(project_name))
             sync_data.source_path.append(
                 "{0}/{1}.uproject".format(project_name, project_name))
-            sync_data.content_path.append("{0}/Content/".format("S1Game"))
-            sync_data.content_path.append("{0}/Config/".format("S1Game"))
-            sync_data.content_path.append("{0}/Scripts/".format("S1Game"))
-            sync_data.content_path.append("{0}/Build/".format("S1Game"))
-            sync_data.content_path.append("S1GameServer")
+            sync_data.content_path = "{0}/Content/".format("S1Game")
+            sync_data.external_path.append("{0}/Config/".format("S1Game"))
+            sync_data.external_path.append("{0}/Scripts/".format("S1Game"))
+            sync_data.external_path.append("{0}/Build/".format("S1Game"))
+            sync_data.external_path.append("S1GameServer")
             sync_process = SyncProcess(sync_data, self.context.event_queue)
             sync_process.start()
 
@@ -503,21 +530,20 @@ class LaunchThread(threading.Thread):
         while True:
             if not self.context.event_queue.empty():
                 item = self.context.event_queue.get(block=True, timeout=1)
-                self.context.message_queue.put(item)
-
                 if isinstance(item, EventData):
-                    if item.event == EventEnum.SyncSourceFinished:
+                    if item.event == EventName.SyncSourceFinished:
                         if need_build:
                             self.start_build(project_name)
                         else:
                             build_finished = True
-                    elif item.event == EventEnum.SyncFinished:
+                    elif item.event == EventName.SyncFinished:
                         sync_finished = True
-                    elif item.event == EventEnum.BuildFinished:
+                    elif item.event == EventName.BuildFinished:
                         build_finished = True
-
                     if sync_finished and build_finished:
                         break
+                else:
+                    self.context.message_queue.put(item)
 
         if self.context.view_data.replace_target:
             pass
@@ -540,6 +566,7 @@ class SyncProcess(Process):
         super().__init__()
         self.sync_data: SyncData = sync_data
         self.event_queue: Queue = event_queue
+        self.stage = StageName.SyncSource
 
     def get_client_stream_param(self, relation_path):
         client_stream = self.sync_data.ClientStream
@@ -579,34 +606,40 @@ class SyncProcess(Process):
 
     def read_sync_output(self, process):
         while process.poll() is None:
-            output: str = process.stdout.readline().rstrip().decode('UTF8')
+            output: str = process.stdout.readline().rstrip().decode('UTF8', errors='ignore')
             if output == '' and process.poll() is not None:
                 break
             if len(output) > 0:
                 yield output
 
     def run(self):
-        self.event_queue.put(UIMessageData("start sync source"))
 
-        self.event_queue.put(EventData(EventEnum.BeginSyncSource))
+        self.stage = StageName.SyncSource
         self.sync(self.sync_data.source_path)
-        self.event_queue.put(EventData(EventEnum.SyncSourceFinished))
 
-        self.event_queue.put(UIMessageData("start sync content"))
-        self.sync(self.sync_data.content_path)
+        self.event_queue.put(EventData(EventName.SyncSourceFinished))
 
-        self.event_queue.put(UIMessageData("finish sync content"))
+        content_path = []
+        content_path.extend(self.sync_data.external_path)
+        if self.sync_data.full_sync:
+            content_path.append(self.sync_data.content_path)
+        else:
+            self.filte_content(content_path)
 
-        self.event_queue.put(EventData(EventEnum.SyncFinished))
+        self.stage = StageName.SyncContext
+        self.sync(content_path)
+
+        self.event_queue.put(EventData(EventName.SyncFinished))
 
     def sync(self, paths):
         depot_path = ""
         for x in paths:
             depot_path += self.get_client_stream_param(x)
             depot_path += " "
-        source_sync_total = self.get_total_sync_num(depot_path)
+        sync_total = self.get_total_sync_num(depot_path)
 
-        if source_sync_total > 0:
+        if sync_total > 0:
+            self.event_queue.put(UIBeginStageData(self.stage, sync_total))
             cmd = 'p4 -I -C utf8 sync {0}'.format(depot_path)
             process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=False)
             process.daemon = True
@@ -614,22 +647,41 @@ class SyncProcess(Process):
             for output in self.read_sync_output(process):
                 if "- updating" in output or "- added" in output or "- deleted" in output:
                     current += 1
-                    self.event_queue.put(UISyncProgressData(current, source_sync_total))
-
-
+                    self.event_queue.put(UIProgressStageData(self.stage, current))
+            self.event_queue.put(UIEndStageData(self.stage))
+    def filte_content(self,content_path):
+        cmd = 'p4 sync -n'
+        depot_path = self.get_client_stream_param(self.sync_data.content_path)
+        output: str = subprocess.check_output(cmd + " " + depot_path, encoding='utf-8')
+        sync_paths = []
+        for line in output.splitlines():
+            line = line.strip()
+            sync_path = line[:line.index("#")]
+            if "__ExternalActors__" in sync_path or "__ExternalObjects__" in sync_path or '/Maps/Nord/' in sync_path:
+                pass
+            else:
+                x = sync_path[2:].split("/")
+                x = "/".join(x[2:5])
+                if not x.endswith(".uasset"):
+                    x += "/"
+                if x not in sync_paths:
+                    content_path.append(x)
 class BuildProcess(Process):
     def __init__(self, build_data: BuildData, event_queue: Queue):
         super().__init__()
         self.build_data: BuildData = build_data
         self.event_queue: Queue = event_queue
+        self.stage = StageName.BuildGame
 
     def run(self):
         if self.build_data.build_editor:
+            self.stage = StageName.BuildEditor
             self.build_editor()
         if self.build_data.build_game:
+            self.stage = StageName.BuildGame
             self.build_game()
 
-        self.event_queue.put(EventData(EventEnum.BuildFinished))
+        self.event_queue.put(EventData(EventName.BuildFinished))
 
     def build_editor(self):
         self.event_queue.put(UIMessageData("Start Build Editor"))
@@ -642,7 +694,7 @@ class BuildProcess(Process):
 
             if os.path.exists(engine_batch):
                 cmd = [engine_batch, project_file, "-VisualStudio2022", "-Game", "-Engine", "-Programs"]
-                p = subprocess.Popen(cmd, shell=True, stdout=None, encoding="UTF8")
+                p = subprocess.Popen(cmd, shell=False, stdout=None, encoding="UTF8")
                 p.communicate()
 
         generate_project_files()
@@ -653,22 +705,21 @@ class BuildProcess(Process):
         params += ' -Target="ShaderCompileWorker Win64 Development -Quiet"'
         params += " -WaitMutex -FromMsBuild"
 
-        process = subprocess.Popen("{0} {1}".format(bat, params), shell=True, stdout=subprocess.PIPE,
+        process = subprocess.Popen("{0} {1}".format(bat, params), shell=False, stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT)
         process.daemon = True
 
-        while process.poll() is None:
-            try:
-                output: str = process.stdout.readline().rstrip().decode('UTF8')
-                if output == '' and process.poll() is not None:
-                    break
 
-                if len(output) > 0:
-                    self.update_build_progress(output)
-                    print(output)
+        total = 0
+        for output in self.read_build_output(process):
+            current, temp_total = self.update_build_progress(output)
+            if total == 0 and temp_total != 0:
+                total = temp_total
+                self.event_queue.put(UIBeginStageData(StageName.BuildEditor, total))
+            elif total > 0 and current > 0:
+                self.event_queue.put(UIProgressStageData(StageName.BuildEditor, current))
 
-            except:
-                pass
+        self.event_queue.put(UIEndStageData(StageName.BuildEditor))
 
     def build_game(self):
 
@@ -682,18 +733,27 @@ class BuildProcess(Process):
         CMD_Params += " -noP4 -stdout -UTF8Output -Build -SkipCook -SkipStage -SkipPackage"
         CMD_Params += " -skipbuildeditor -nobootstrapexe"
 
-        process = subprocess.Popen("{0} {1}".format(UAT_Path, CMD_Params), shell=True, stdout=subprocess.PIPE,
+        process = subprocess.Popen("{0} {1}".format(UAT_Path, CMD_Params), shell=False, stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT)
 
+        total = 0
+        for output in self.read_build_output(process):
+            current, temp_total = self.update_build_progress(output)
+            if total == 0 and temp_total != 0:
+                total = temp_total
+                self.event_queue.put(UIBeginStageData(StageName.BuildGame, total))
+            elif total > 0 and current > 0:
+                self.event_queue.put(UIProgressStageData(StageName.BuildGame, current))
+
+        self.event_queue.put(UIEndStageData(StageName.BuildGame))
+
+    def read_build_output(self, process):
         while process.poll() is None:
-            output = process.stdout.readline().rstrip().decode('UTF8', errors='ignore')
+            output: str = process.stdout.readline().rstrip().decode('UTF8', errors='ignore')
             if output == '' and process.poll() is not None:
                 break
             if len(output) > 0:
-                self.update_build_progress(output)
-                print(output)
-
-        self.event_queue.put(UIMessageData("finish build game"))
+                yield output
 
     def update_build_progress(self, output):
         if output.startswith('['):
@@ -702,13 +762,16 @@ class BuildProcess(Process):
             if len(word) == 2:
                 a = int(word[0])
                 b = int(word[1])
-                if b > 0:
-                    self.event_queue.put(UIBuildProgressData(a, b))
-                else:
-                    print(output)
+                return a, b
+
+        return 0, 0
 
 
 def main():
+    # xxx.py
+    if len(sys.argv) == 1:
+        pass
+
     context = BuildContext()
     view = MainView(context)
     view.mainloop()
