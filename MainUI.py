@@ -24,6 +24,7 @@ class StageName(Enum):
     BuildGame = 4,
     GetLatestChangeList = 5,
     SyncExternal = 6,
+    GenerateProjectFile = 7
     Exit = 100
 
 
@@ -66,6 +67,7 @@ class ViewData:
         self.P4USER = ""
         self.P4CLIENT = ""
         self.ChangeList = ""
+        self.full_sync = False
         self.GameConfig = ""
 
         self.sync = False
@@ -182,7 +184,9 @@ class BuildContext:
 
     def save_view_data(self):
         with open('settings.ini', 'w', encoding='UTF8') as f:
-            f.writelines([self.view_data.P4PORT + "\n", self.view_data.P4USER + "\n", self.view_data.P4CLIENT + "\n"])
+            f.writelines([self.view_data.P4PORT + "\n",
+                          self.view_data.P4USER + "\n",
+                          self.view_data.P4CLIENT + "\n"])
 
 
 class MainView(tk.Tk):
@@ -320,15 +324,15 @@ class MainView(tk.Tk):
 
     def switch_build_game_checkbox(self):
         if self.tk_build_exe.get():
-            self.left_tree.expand(3)
+            self.left_tree.expand(4)
         else:
-            self.left_tree.collect(3)
+            self.left_tree.collect(4)
 
     def switch_start_game_checkbox(self):
         if self.tk_start_game.get():
-            self.left_tree.expand(6)
+            self.left_tree.expand(7)
         else:
-            self.left_tree.collect(6)
+            self.left_tree.collect(7)
 
     def step(self):
         self.context.view_data.P4USER = self.tk_P4USER.get()
@@ -336,6 +340,7 @@ class MainView(tk.Tk):
         self.context.view_data.P4CLIENT = self.tk_P4CLIENT.get()
         self.context.view_data.sync = self.tk_sync.get()
         self.context.view_data.ChangeList = self.tk_change_list.get()
+        self.context.view_data.full_sync = self.tk_sync_full.get()
         self.context.view_data.build_editor = self.tk_build_editor.get()
         self.context.view_data.build_game = self.tk_build_exe.get()
         self.context.view_data.GameConfig = self.tk_game_config_combobox.get()
@@ -350,7 +355,6 @@ class MainView(tk.Tk):
             return
 
         self.step()
-        self.context.save_view_data()
 
         if self.ui_tread is None:
             self.ui_tread = UIThread(self, self.context.message_queue)
@@ -392,6 +396,11 @@ class UIThread(threading.Thread):
             return "build game"
         elif stage == StageName.BuildEditor:
             return "build editor"
+        elif stage == StageName.GenerateProjectFile:
+            return "generate project file"
+        elif stage == StageName.SyncExternal:
+            return "sync external content"
+
         return "unkown"
 
     def run(self):
@@ -406,33 +415,33 @@ class UIThread(threading.Thread):
                 item = self.message_queue.get(block=False)
                 if isinstance(item, UIMessageData):
                     self.view.tk_event_listview.insert(tk.END, item.message)
+                    if item.message.startswith("changelist:"):
+                        self.view.tk_change_list.set(item.message[len("changelist:"):])
+                        self.view.update()
                 else:
                     do_something = True
                     if isinstance(item, UIBeginStageData):
-                        if item.stage == StageName.GetLatestChangeList:
-                            self.view.tk_change_list = item.total
-                            self.view.update()
-                        else:
-                            stage_statistics[item.stage] = UIStageStatistics()
-                            stage_statistics[item.stage].total = item.total
+                        stage_statistics[item.stage] = UIStageStatistics()
+                        stage_statistics[item.stage].total = item.total
+                        self.view.tk_event_listview.insert(tk.END, self.on_stage_begin(item.stage))
                     elif isinstance(item, UIProgressStageData):
                         if item.stage in stage_statistics:
                             stage_statistics[item.stage].current = item.current
                     elif isinstance(item, UIEndStageData):
                         if item.stage in stage_statistics:
                             stage_statistics[item.stage].end_time = time.time()
+                            self.view.tk_event_listview.insert(tk.END, self.on_stage_end(item.stage))
                         else:
                             if item.stage == StageName.Exit:
                                 need_exit = True
+            elif do_something:
+                do_something = False
+                progress_text = ""
+                for stage, statistics in stage_statistics.items():
+                    progress_text += "{0}:{1}/{2}    ".format(self.get_stage_text(stage), statistics.current,
+                                                              statistics.total)
 
-                    if do_something:
-                        do_something = False
-                        progress_text = ""
-                        for stage, statistics in stage_statistics.items():
-                            progress_text += "{0}:{1}/{2}    ".format(self.get_stage_text(stage), statistics.current,
-                                                                      statistics.total)
-
-                        self.view.tk_step_text.set(progress_text)
+                    self.view.tk_step_text.set(progress_text)
 
                 if need_exit and not do_something:
                     break
@@ -500,12 +509,18 @@ class LaunchThread(threading.Thread):
         for f in os.listdir(project_path):
             if f.endswith(".uproject"):
                 project_name = f[:-9]
+        select_change_list = self.read_changelist()
+        if self.context.view_data.sync:
+            select_change_list = self.context.view_data.ChangeList if len(
+                self.context.view_data.ChangeList) > 0 else self.p4.Head
+
+        self.context.message_queue.put(UIMessageData("changelist:{0}".format(select_change_list)))
+
 
         if self.context.view_data.sync:
             sync_data: SyncData = SyncData()
             sync_data.ClientStream = self.p4.ClientStream
-            sync_data.ChangeList = self.context.view_data.ChangeList if len(
-                self.context.view_data.ChangeList) > 0 else self.p4.Head
+            sync_data.ChangeList = select_change_list
             sync_data.source_path.append("UE5EA/")
             sync_data.source_path.append("{0}/Source/".format(project_name))
             sync_data.source_path.append("{0}/Plugins/".format(project_name))
@@ -516,6 +531,7 @@ class LaunchThread(threading.Thread):
             sync_data.external_path.append("{0}/Scripts/".format("S1Game"))
             sync_data.external_path.append("{0}/Build/".format("S1Game"))
             sync_data.external_path.append("S1GameServer")
+            sync_data.full_sync = self.context.view_data.full_sync
             sync_process = SyncProcess(sync_data, self.context.event_queue)
             sync_process.start()
 
@@ -536,6 +552,7 @@ class LaunchThread(threading.Thread):
                             self.start_build(project_name)
                         else:
                             build_finished = True
+                        self.save_changelist(select_change_list)
                     elif item.event == EventName.SyncFinished:
                         sync_finished = True
                     elif item.event == EventName.BuildFinished:
@@ -545,8 +562,57 @@ class LaunchThread(threading.Thread):
                 else:
                     self.context.message_queue.put(item)
 
-        if self.context.view_data.replace_target:
-            pass
+        find_target = ""
+        if self.context.view_data.replace_target and len(select_change_list) > 0:
+            self.context.message_queue.put(UIMessageData("start replace target"))
+            for d in os.listdir("D:/Game"):
+                path = os.path.join("D:/Game", d)
+                if os.path.isdir(path):
+                    if "_{0}_".format(select_change_list) in path:
+
+                        self.context.message_queue.put(UIMessageData("find replace target"))
+
+                        backup = os.path.join(path, "Win64", "S1Game", "Binaries", "Win64",
+                                              "S1Game_{0}".format(select_change_list))
+                        origin = os.path.join(path, "Win64", "S1Game", "Binaries", "Win64",
+                                              "S1Game".format(select_change_list))
+
+
+                        output = os.path.join(self.p4.ClientRoot, "S1Game", "Binaries", "Win64", "S1Game")
+
+                        print("backup:" + backup)
+                        print("origin:" + origin)
+                        print("origin:" + output)
+                        find_target = origin + ".exe"
+
+                        if not os.path.exists(backup + ".exe"):
+                            shutil.move(origin + ".exe", backup + ".exe")
+                        elif os.path.exists(origin + ".exe"):
+                            os.remove(origin + ".exe")
+                        if not os.path.exists(backup + ".pdb"):
+                            shutil.move(origin + ".pdb", backup + ".pdb")
+                        elif os.path.exists(origin + ".pdb"):
+                            os.remove(origin + ".pdb")
+
+                        if os.path.exists(output + ".exe"):
+                            shutil.copy(output + ".exe", origin + ".exe")
+                        if os.path.exists(output + ".pdb"):
+                            shutil.copy(output + ".pdb", origin + ".pdb")
+                        self.context.message_queue.put(UIMessageData("finish replace target"))
+                        break
+            if len(find_target) and os.path.exists(find_target):
+                subprocess.Popen(["start",find_target])
+
+        if self.context.view_data.start_game:
+            
+
+    def save_changelist(self,changelist):
+        with open(os.path.join(self.p4.ClientRoot,"changelist.txt"),mode="w") as f:
+            f.write(changelist)
+    def read_changelist(self):
+        if os.path.exists(os.path.join(self.p4.ClientRoot,"changelist.txt")):
+            with open(os.path.join(self.p4.ClientRoot,"changelist.txt"),mode="r") as f:
+                return f.readline().strip()
 
     def start_build(self, project_name):
         build_data = BuildData()
@@ -566,7 +632,7 @@ class SyncProcess(Process):
         super().__init__()
         self.sync_data: SyncData = sync_data
         self.event_queue: Queue = event_queue
-        self.stage = StageName.SyncSource
+        self.stage = StageName.Begin
 
     def get_client_stream_param(self, relation_path):
         client_stream = self.sync_data.ClientStream
@@ -584,20 +650,21 @@ class SyncProcess(Process):
     def get_total_sync_num(self, depot_path):
         cmd = 'p4 sync -N'
 
-        output: str = subprocess.check_output(cmd + " " + depot_path, encoding='utf-8')
-
+        output: str = subprocess.check_output(cmd + " " + depot_path, encoding='utf-8', errors="ignore")
+        lines = output.splitlines()
         change_file_num = [0, 0, 0]
-        if output.startswith("Server network estimates:"):
-            output = output[len("Server network estimates: "):]
-            l = output.split(",")
-            x = l[0][len("files added/updated/deleted="):]
-            x = x.split("/")
 
-            for i in range(3):
-                change_file_num[i] = int(x[i])
+        for line in lines:
+            if line.startswith("Server network estimates:"):
+                line = line[len("Server network estimates: "):]
+                l = line.split(",")
+                x = l[0][len("files added/updated/deleted="):]
+                x = x.split("/")
+                for i in range(3):
+                    change_file_num[i] += int(x[i])
 
-        else:
-            raise Exception("Server network estimates not yet implemented")
+            else:
+                raise Exception("Server network estimates not yet implemented")
 
         self.event_queue.put(UIMessageData("added:{0}, updated:{1}, deleted:{2}".format(change_file_num[0],
                                                                                         change_file_num[1],
@@ -613,29 +680,32 @@ class SyncProcess(Process):
                 yield output
 
     def run(self):
+        self.event_queue.put(UIMessageData("changelist:%s" % (self.sync_data.ChangeList)))
+        self.sync_source()
+        self.event_queue.put(EventData(EventName.SyncSourceFinished))
+        self.sync_content()
+        self.event_queue.put(EventData(EventName.SyncFinished))
 
+    def sync_source(self):
         self.stage = StageName.SyncSource
         self.sync(self.sync_data.source_path)
 
-        self.event_queue.put(EventData(EventName.SyncSourceFinished))
-
+    def sync_content(self):
         content_path = []
         content_path.extend(self.sync_data.external_path)
         if self.sync_data.full_sync:
             content_path.append(self.sync_data.content_path)
         else:
             self.filte_content(content_path)
-
         self.stage = StageName.SyncContext
         self.sync(content_path)
-
-        self.event_queue.put(EventData(EventName.SyncFinished))
 
     def sync(self, paths):
         depot_path = ""
         for x in paths:
             depot_path += self.get_client_stream_param(x)
             depot_path += " "
+        print(depot_path)
         sync_total = self.get_total_sync_num(depot_path)
 
         if sync_total > 0:
@@ -649,10 +719,11 @@ class SyncProcess(Process):
                     current += 1
                     self.event_queue.put(UIProgressStageData(self.stage, current))
             self.event_queue.put(UIEndStageData(self.stage))
-    def filte_content(self,content_path):
+
+    def filte_content(self, content_path):
         cmd = 'p4 sync -n'
         depot_path = self.get_client_stream_param(self.sync_data.content_path)
-        output: str = subprocess.check_output(cmd + " " + depot_path, encoding='utf-8')
+        output: str = subprocess.check_output(cmd + " " + depot_path, encoding='utf-8', errors="ignore")
         sync_paths = []
         for line in output.splitlines():
             line = line.strip()
@@ -664,8 +735,10 @@ class SyncProcess(Process):
                 x = "/".join(x[2:5])
                 if not x.endswith(".uasset"):
                     x += "/"
-                if x not in sync_paths:
+                if x not in content_path:
                     content_path.append(x)
+
+
 class BuildProcess(Process):
     def __init__(self, build_data: BuildData, event_queue: Queue):
         super().__init__()
@@ -675,6 +748,7 @@ class BuildProcess(Process):
 
     def run(self):
         if self.build_data.build_editor:
+            self.generate_project_files()
             self.stage = StageName.BuildEditor
             self.build_editor()
         if self.build_data.build_game:
@@ -683,22 +757,21 @@ class BuildProcess(Process):
 
         self.event_queue.put(EventData(EventName.BuildFinished))
 
-    def build_editor(self):
-        self.event_queue.put(UIMessageData("Start Build Editor"))
+    def generate_project_files(self):
+        self.event_queue.put(UIBeginStageData(StageName.GenerateProjectFile, 0))
         project_file = os.path.join(self.build_data.ProjectPath, "{0}.uproject".format(self.build_data.ProjectName))
+        engine_batch = os.path.join(self.build_data.EnginePath, "Engine", "Build", "BatchFiles",
+                                    "GenerateProjectFiles.bat")
 
-        def generate_project_files():
+        if os.path.exists(engine_batch):
+            cmd = [engine_batch, project_file, "-VisualStudio2022", "-Game", "-Engine", "-Programs"]
+            p = subprocess.Popen(cmd, shell=False, stdout=None, encoding="UTF8")
+            p.communicate()
 
-            engine_batch = os.path.join(self.build_data.EnginePath, "Engine", "Build", "BatchFiles",
-                                        "GenerateProjectFiles.bat")
+        self.event_queue.put(UIEndStageData(StageName.GenerateProjectFile))
 
-            if os.path.exists(engine_batch):
-                cmd = [engine_batch, project_file, "-VisualStudio2022", "-Game", "-Engine", "-Programs"]
-                p = subprocess.Popen(cmd, shell=False, stdout=None, encoding="UTF8")
-                p.communicate()
-
-        generate_project_files()
-
+    def build_editor(self):
+        project_file = os.path.join(self.build_data.ProjectPath, "{0}.uproject".format(self.build_data.ProjectName))
         bat = "{0}/Engine/Build/BatchFiles/Build.bat".format(self.build_data.EnginePath)
         params = " -Target={0}Editor Win64 {1}".format(self.build_data.ProjectName, "Development")
         params += " -Project={0}".format(project_file)
@@ -708,7 +781,6 @@ class BuildProcess(Process):
         process = subprocess.Popen("{0} {1}".format(bat, params), shell=False, stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT)
         process.daemon = True
-
 
         total = 0
         for output in self.read_build_output(process):
@@ -722,8 +794,6 @@ class BuildProcess(Process):
         self.event_queue.put(UIEndStageData(StageName.BuildEditor))
 
     def build_game(self):
-
-        self.event_queue.put(UIMessageData("start build game"))
         UAT_Path = os.path.join(self.build_data.EnginePath, "Engine", "Build", "BatchFiles",
                                 "RunUAT.bat")
 
