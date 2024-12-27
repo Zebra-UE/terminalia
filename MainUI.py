@@ -603,7 +603,7 @@ class LaunchThread(threading.Thread):
             if len(find_target) and os.path.exists(find_target):
                 subprocess.Popen(["start",find_target])
 
-        if self.context.view_data.start_game:
+        #if self.context.view_data.start_game:
             
 
     def save_changelist(self,changelist):
